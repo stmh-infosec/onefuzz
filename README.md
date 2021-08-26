@@ -59,7 +59,7 @@ additional questions or comments.
 
 The software may collect information about you and your use of the software and
 send it to Microsoft. Microsoft may use this information to provide services
-and improve our products and services. You may [turn off the telemetry as
+and improve our product and services. You may [turn off the telemetry as
 described in the
 repository](docs/telemetry.md#how-to-disable-sending-telemetry-to-microsoft).
 There are also some features in the software that may enable you and Microsoft
