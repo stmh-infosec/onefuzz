@@ -55,7 +55,7 @@ For more information see the [Code of Conduct FAQ](https://opensource.microsoft.
 or contact [opencode@microsoft.com](mailto:opencode@microsoft.com) with any
 additional questions or comments.
 
-## Data Collection
+## Data Collections
 
 The software may collect information about you and your use of the software and
 send it to Microsoft. Microsoft may use this information to provide services
