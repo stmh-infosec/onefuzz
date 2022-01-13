@@ -18,8 +18,10 @@ from .azure.auth import build_auth
 from .azure.containers import save_blob
 from .azure.creds import get_base_region
 from .azure.ip import get_public_ip
+from .azure.nsg import NSG
 from .azure.storage import StorageType
 from .azure.vm import VM
+from .config import InstanceConfig
 from .extension import repro_extensions
 from .orm import ORMMixin, QueryFilter
 from .reports import get_report
@@ -45,7 +47,11 @@ class Repro(BASE_REPRO, ORMMixin):
         self.state = VmState.stopping
         self.save()
 
-    def get_vm(self) -> VM:
+    def get_vm(self, config: InstanceConfig) -> VM:
+        tags = None
+        if config.vm_tags:
+            tags = config.vm_tags
+
         task = Task.get_by_task_id(self.task_id)
         if isinstance(task, Error):
             raise Exception("previously existing task missing: %s" % self.task_id)
@@ -69,10 +75,12 @@ class Repro(BASE_REPRO, ORMMixin):
             sku=vm_config.sku,
             image=vm_config.image,
             auth=self.auth,
+            tags=tags,
         )
 
     def init(self) -> None:
-        vm = self.get_vm()
+        config = InstanceConfig.fetch()
+        vm = self.get_vm(config)
         vm_data = vm.get()
         if vm_data:
             if vm_data.provisioning_state == "Failed":
@@ -85,6 +93,22 @@ class Repro(BASE_REPRO, ORMMixin):
 
                 self.state = VmState.extensions_launch
         else:
+            nsg = NSG(
+                name=vm.region,
+                region=vm.region,
+            )
+            result = nsg.create()
+            if isinstance(result, Error):
+                self.set_failed(result)
+                return
+
+            nsg_config = config.proxy_nsg_config
+            result = nsg.set_allowed_sources(nsg_config)
+            if isinstance(result, Error):
+                self.set_failed(result)
+                return
+
+            vm.nsg = nsg
             result = vm.create()
             if isinstance(result, Error):
                 self.set_error(result)
@@ -109,7 +133,8 @@ class Repro(BASE_REPRO, ORMMixin):
         return None
 
     def extensions_launch(self) -> None:
-        vm = self.get_vm()
+        config = InstanceConfig.fetch()
+        vm = self.get_vm(config)
         vm_data = vm.get()
         if not vm_data:
             self.set_error(
@@ -140,7 +165,8 @@ class Repro(BASE_REPRO, ORMMixin):
         self.save()
 
     def stopping(self) -> None:
-        vm = self.get_vm()
+        config = InstanceConfig.fetch()
+        vm = self.get_vm(config)
         if not vm.is_deleted():
             logging.info("vm stopping: %s", self.vm_id)
             vm.delete()

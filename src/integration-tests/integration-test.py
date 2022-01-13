@@ -22,9 +22,10 @@ import logging
 import os
 import re
 import sys
+import time
 from enum import Enum
 from shutil import which
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple, TypeVar
 from uuid import UUID, uuid4
 
 import requests
@@ -69,6 +70,7 @@ class Integration(BaseModel):
     reboot_after_setup: Optional[bool] = Field(default=False)
     test_repro: Optional[bool] = Field(default=True)
     target_options: Optional[List[str]]
+    inject_fake_regression: bool = Field(default=False)
 
 
 TARGETS: Dict[str, Integration] = {
@@ -90,6 +92,7 @@ TARGETS: Dict[str, Integration] = {
             ContainerType.inputs: 2,
         },
         reboot_after_setup=True,
+        inject_fake_regression=True,
     ),
     "linux-libfuzzer-with-options": Integration(
         template=TemplateType.libfuzzer,
@@ -161,6 +164,7 @@ TARGETS: Dict[str, Integration] = {
         target_exe="fuzz.exe",
         inputs="seeds",
         wait_for_files={ContainerType.unique_reports: 1},
+        inject_fake_regression=True,
     ),
     "linux-trivial-crash-asan": Integration(
         template=TemplateType.radamsa,
@@ -181,6 +185,7 @@ TARGETS: Dict[str, Integration] = {
             ContainerType.unique_reports: 1,
             ContainerType.coverage: 1,
         },
+        inject_fake_regression=True,
     ),
     "windows-libfuzzer-linked-library": Integration(
         template=TemplateType.libfuzzer,
@@ -212,9 +217,39 @@ TARGETS: Dict[str, Integration] = {
         target_exe="fuzz.exe",
         inputs="seeds",
         wait_for_files={ContainerType.unique_reports: 1},
+        inject_fake_regression=True,
     ),
 }
 
+OperationResult = TypeVar("OperationResult")
+
+def retry(
+    operation: Callable[[Any], OperationResult],
+    description: str,
+    tries: int = 10,
+    wait_duration: int = 10,
+    data: Any = None,
+) -> OperationResult:
+    logger = logging.Logger
+    count = 0
+    while True:
+        try:
+            return operation(data)
+        except Exception as exc:
+            exception = exc
+            logger.error(f"failed '{description}'. logging stack trace.")
+            logger.error(exc)
+        count += 1
+        if count >= tries:
+            if exception:
+                raise exception
+            else:
+                raise Exception(f"failed '{description}'")
+        else:
+            logger.info(
+                f"waiting {wait_duration} seconds before retrying '{description}'"
+            )
+            time.sleep(wait_duration)
 
 class TestOnefuzz:
     def __init__(self, onefuzz: Onefuzz, logger: logging.Logger, test_id: UUID) -> None:
@@ -336,6 +371,9 @@ class TestOnefuzz:
                 )
             else:
                 raise NotImplementedError
+
+            if config.inject_fake_regression and job is not None:
+                self.of.debug.notification.job(job.job_id)
 
             if not job:
                 raise Exception("missing job")
@@ -828,10 +866,14 @@ class Run(Command):
         test_id: UUID,
         *,
         endpoint: Optional[str],
+        client_id: Optional[str],
+        client_secret: Optional[str],
         poll: bool = False,
         stop_on_complete_check: bool = False,
     ) -> None:
-        self.onefuzz.__setup__(endpoint=endpoint)
+        self.onefuzz.__setup__(
+            endpoint=endpoint, client_id=client_id, client_secret=client_secret
+        )
         tester = TestOnefuzz(self.onefuzz, self.logger, test_id)
         result = tester.check_jobs(
             poll=poll, stop_on_complete_check=stop_on_complete_check
@@ -839,8 +881,17 @@ class Run(Command):
         if not result:
             raise Exception("jobs failed")
 
-    def check_repros(self, test_id: UUID, *, endpoint: Optional[str]) -> None:
-        self.onefuzz.__setup__(endpoint=endpoint)
+    def check_repros(
+        self,
+        test_id: UUID,
+        *,
+        endpoint: Optional[str],
+        client_id: Optional[str],
+        client_secret: Optional[str],
+    ) -> None:
+        self.onefuzz.__setup__(
+            endpoint=endpoint, client_id=client_id, client_secret=client_secret
+        )
         tester = TestOnefuzz(self.onefuzz, self.logger, test_id)
         launch_result, repros = tester.launch_repro()
         result = tester.check_repro(repros)
@@ -852,6 +903,8 @@ class Run(Command):
         samples: Directory,
         *,
         endpoint: Optional[str] = None,
+        client_id: Optional[str] = None,
+        client_secret: Optional[str] = None,
         pool_size: int = 10,
         region: Optional[Region] = None,
         os_list: List[OS] = [OS.linux, OS.windows],
@@ -862,20 +915,44 @@ class Run(Command):
         if test_id is None:
             test_id = uuid4()
         self.logger.info("launching test_id: %s", test_id)
+        
+        def try_setup(data: Any) -> None:
+            self.onefuzz.__setup__(
+                endpoint=endpoint, client_id=client_id, client_secret=client_secret
+            )
 
-        self.onefuzz.__setup__(endpoint=endpoint)
+        retry(try_setup, "trying to configure")
+
         tester = TestOnefuzz(self.onefuzz, self.logger, test_id)
         tester.setup(region=region, pool_size=pool_size, os_list=os_list)
         tester.launch(samples, os_list=os_list, targets=targets, duration=duration)
         return test_id
 
-    def cleanup(self, test_id: UUID, *, endpoint: Optional[str]) -> None:
-        self.onefuzz.__setup__(endpoint=endpoint)
+    def cleanup(
+        self,
+        test_id: UUID,
+        *,
+        endpoint: Optional[str],
+        client_id: Optional[str],
+        client_secret: Optional[str],
+    ) -> None:
+        self.onefuzz.__setup__(
+            endpoint=endpoint, client_id=client_id, client_secret=client_secret
+        )
         tester = TestOnefuzz(self.onefuzz, self.logger, test_id=test_id)
         tester.cleanup()
 
-    def check_logs(self, test_id: UUID, *, endpoint: Optional[str]) -> None:
-        self.onefuzz.__setup__(endpoint=endpoint)
+    def check_logs(
+        self,
+        test_id: UUID,
+        *,
+        endpoint: Optional[str],
+        client_id: Optional[str],
+        client_secret: Optional[str],
+    ) -> None:
+        self.onefuzz.__setup__(
+            endpoint=endpoint, client_id=client_id, client_secret=client_secret
+        )
         tester = TestOnefuzz(self.onefuzz, self.logger, test_id=test_id)
         tester.check_logs_for_errors()
 
@@ -884,6 +961,8 @@ class Run(Command):
         samples: Directory,
         *,
         endpoint: Optional[str] = None,
+        client_id: Optional[str] = None,
+        client_secret: Optional[str] = None,
         pool_size: int = 15,
         region: Optional[Region] = None,
         os_list: List[OS] = [OS.linux, OS.windows],
@@ -899,6 +978,8 @@ class Run(Command):
             self.launch(
                 samples,
                 endpoint=endpoint,
+                client_id=client_id,
+                client_secret=client_secret,
                 pool_size=pool_size,
                 region=region,
                 os_list=os_list,
@@ -907,15 +988,30 @@ class Run(Command):
                 duration=duration,
             )
             self.check_jobs(
-                test_id, endpoint=endpoint, poll=True, stop_on_complete_check=True
+                test_id,
+                endpoint=endpoint,
+                client_id=client_id,
+                client_secret=client_secret,
+                poll=True,
+                stop_on_complete_check=True,
             )
 
             if skip_repro:
                 self.logger.warning("not testing crash repro")
             else:
-                self.check_repros(test_id, endpoint=endpoint)
+                self.check_repros(
+                    test_id,
+                    endpoint=endpoint,
+                    client_id=client_id,
+                    client_secret=client_secret,
+                )
 
-            self.check_logs(test_id, endpoint=endpoint)
+            self.check_logs(
+                test_id,
+                endpoint=endpoint,
+                client_id=client_id,
+                client_secret=client_secret,
+            )
 
         except Exception as e:
             self.logger.error("testing failed: %s", repr(e))
@@ -926,7 +1022,12 @@ class Run(Command):
             success = False
 
         try:
-            self.cleanup(test_id, endpoint=endpoint)
+            self.cleanup(
+                test_id,
+                endpoint=endpoint,
+                client_id=client_id,
+                client_secret=client_secret,
+            )
         except Exception as e:
             self.logger.error("testing failed: %s", repr(e))
             error = e

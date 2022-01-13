@@ -5,18 +5,16 @@
 
 import json
 import logging
-import os
-from typing import TYPE_CHECKING, Optional, Sequence, Type, TypeVar, Union
+from typing import TYPE_CHECKING, Sequence, Type, TypeVar, Union
 from uuid import UUID
 
 from azure.functions import HttpRequest, HttpResponse
-from azure.graphrbac.models import GraphErrorException
 from onefuzztypes.enums import ErrorCode
 from onefuzztypes.models import Error
 from onefuzztypes.responses import BaseResponse
+from pydantic import BaseModel  # noqa: F401
 from pydantic import ValidationError
 
-from .azure.creds import is_member_of
 from .orm import ModelMixin
 
 # We don't actually use these types at runtime at this time.  Rather,
@@ -24,29 +22,6 @@ from .orm import ModelMixin
 # types during type checking.
 if TYPE_CHECKING:
     from onefuzztypes.requests import BaseRequest  # noqa: F401
-    from pydantic import BaseModel  # noqa: F401
-
-
-def check_access(req: HttpRequest) -> Optional[Error]:
-    if "ONEFUZZ_AAD_GROUP_ID" not in os.environ:
-        return None
-
-    group_id = os.environ["ONEFUZZ_AAD_GROUP_ID"]
-    member_id = req.headers["x-ms-client-principal-id"]
-    try:
-        result = is_member_of(group_id, member_id)
-    except GraphErrorException:
-        return Error(
-            code=ErrorCode.UNAUTHORIZED, errors=["unable to interact with graph"]
-        )
-    if not result:
-        logging.error("unauthorized access: %s is not in %s", member_id, group_id)
-        return Error(
-            code=ErrorCode.UNAUTHORIZED,
-            errors=["not approved to use this instance of onefuzz"],
-        )
-
-    return None
 
 
 def ok(
@@ -92,8 +67,8 @@ def not_ok(
         )
 
 
-def redirect(location: str) -> HttpResponse:
-    return HttpResponse(status_code=302, headers={"Location": location})
+def redirect(url: str) -> HttpResponse:
+    return HttpResponse(status_code=302, headers={"Location": url})
 
 
 def convert_error(err: ValidationError) -> Error:
@@ -119,10 +94,6 @@ A = TypeVar("A", bound="BaseModel")
 
 
 def parse_request(cls: Type[A], req: HttpRequest) -> Union[A, Error]:
-    access = check_access(req)
-    if isinstance(access, Error):
-        return access
-
     try:
         return cls.parse_obj(req.get_json())
     except ValidationError as err:
@@ -130,10 +101,6 @@ def parse_request(cls: Type[A], req: HttpRequest) -> Union[A, Error]:
 
 
 def parse_uri(cls: Type[A], req: HttpRequest) -> Union[A, Error]:
-    access = check_access(req)
-    if isinstance(access, Error):
-        return access
-
     data = {}
     for key in req.params:
         data[key] = req.params[key]

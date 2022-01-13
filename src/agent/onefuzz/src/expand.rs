@@ -1,8 +1,8 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use crate::sha256::digest_file_blocking;
-use anyhow::{Context, Result};
+use crate::{machine_id::get_machine_id, sha256::digest_file_blocking};
+use anyhow::{format_err, Context, Result};
 use onefuzz_telemetry::{InstanceTelemetryKey, MicrosoftTelemetryKey};
 use std::path::{Path, PathBuf};
 use std::{collections::HashMap, hash::Hash};
@@ -14,7 +14,7 @@ pub enum ExpandedValue<'a> {
     Path(String),
     Scalar(String),
     List(&'a [String]),
-    Mapping(Box<dyn Fn(&Expand<'a>, &str) -> Option<ExpandedValue<'a>> + Send>),
+    Mapping(Box<dyn Fn(&Expand<'a>, &str) -> Result<Option<ExpandedValue<'a>>> + Send>),
 }
 
 #[derive(PartialEq, Eq, Hash, EnumIter)]
@@ -41,6 +41,7 @@ pub enum PlaceHolder {
     ReportsDir,
     JobId,
     TaskId,
+    MachineId,
     CrashesContainer,
     CrashesAccount,
     MicrosoftTelemetryKey,
@@ -73,6 +74,7 @@ impl PlaceHolder {
             Self::ReportsDir => "{reports_dir}",
             Self::JobId => "{job_id}",
             Self::TaskId => "{task_id}",
+            Self::MachineId => "{machine_id}",
             Self::CrashesContainer => "{crashes_container}",
             Self::CrashesAccount => "{crashes_account}",
             Self::MicrosoftTelemetryKey => "{microsoft_telemetry_key}",
@@ -108,41 +110,60 @@ impl<'a> Expand<'a> {
             PlaceHolder::InputFileSha256.get_string(),
             ExpandedValue::Mapping(Box::new(Expand::input_file_sha256)),
         );
+
         Self { values }
     }
 
-    fn input_file_sha256(&self, _format_str: &str) -> Option<ExpandedValue<'a>> {
-        match self.values.get(&PlaceHolder::Input.get_string()) {
-            Some(ExpandedValue::Path(fp)) => {
-                let file = PathBuf::from(fp);
-                digest_file_blocking(file).ok().map(ExpandedValue::Scalar)
-            }
-            _ => None,
-        }
+    // Must be manually called to enable the use of async library code.
+    pub async fn machine_id(self) -> Result<Expand<'a>> {
+        let id = get_machine_id().await?;
+        let value = id.to_string();
+        Ok(self.set_value(PlaceHolder::MachineId, ExpandedValue::Scalar(value)))
     }
 
-    fn extract_file_name_no_ext(&self, _format_str: &str) -> Option<ExpandedValue<'a>> {
-        match self.values.get(&PlaceHolder::Input.get_string()) {
+    fn input_file_sha256(&self, _format_str: &str) -> Result<Option<ExpandedValue<'a>>> {
+        let val = match self.values.get(&PlaceHolder::Input.get_string()) {
             Some(ExpandedValue::Path(fp)) => {
                 let file = PathBuf::from(fp);
-                let stem = file.file_stem()?;
+                let hash = digest_file_blocking(file)?;
+                Some(ExpandedValue::Scalar(hash))
+            }
+            _ => None,
+        };
+
+        Ok(val)
+    }
+
+    fn extract_file_name_no_ext(&self, _format_str: &str) -> Result<Option<ExpandedValue<'a>>> {
+        let val = match self.values.get(&PlaceHolder::Input.get_string()) {
+            Some(ExpandedValue::Path(fp)) => {
+                let file = PathBuf::from(fp);
+                let stem = file
+                    .file_stem()
+                    .ok_or_else(|| format_err!("missing file stem: {}", file.display()))?;
                 let name_as_str = stem.to_string_lossy().to_string();
                 Some(ExpandedValue::Scalar(name_as_str))
             }
             _ => None,
-        }
+        };
+
+        Ok(val)
     }
 
-    fn extract_file_name(&self, _format_str: &str) -> Option<ExpandedValue<'a>> {
-        match self.values.get(&PlaceHolder::Input.get_string()) {
+    fn extract_file_name(&self, _format_str: &str) -> Result<Option<ExpandedValue<'a>>> {
+        let val = match self.values.get(&PlaceHolder::Input.get_string()) {
             Some(ExpandedValue::Path(fp)) => {
                 let file = PathBuf::from(fp);
-                let name = file.file_name()?;
+                let name = file
+                    .file_name()
+                    .ok_or_else(|| format_err!("missing file name: {}", file.display()))?;
                 let name_as_str = name.to_string_lossy().to_string();
                 Some(ExpandedValue::Scalar(name_as_str))
             }
             _ => None,
-        }
+        };
+
+        Ok(val)
     }
 
     pub fn set_value(self, name: PlaceHolder, value: ExpandedValue<'a>) -> Self {
@@ -292,6 +313,7 @@ impl<'a> Expand<'a> {
             ExpandedValue::Scalar(value),
         )
     }
+
     pub fn instance_telemetry_key(self, arg: &InstanceTelemetryKey) -> Self {
         let value = arg.to_string();
         self.set_value(
@@ -343,7 +365,7 @@ impl<'a> Expand<'a> {
                 Ok(arg)
             }
             ExpandedValue::Mapping(func) => {
-                if let Some(value) = func(self, fmtstr) {
+                if let Some(value) = func(self, fmtstr)? {
                     let arg = self.replace_value(fmtstr, arg, &value)?;
                     Ok(arg)
                 } else {
@@ -391,6 +413,7 @@ mod tests {
     use super::Expand;
     use anyhow::{Context, Result};
     use std::path::Path;
+    use uuid::Uuid;
 
     #[test]
     fn test_expand_nested() -> Result<()> {
@@ -484,6 +507,15 @@ mod tests {
             .input_path("src/lib.rs")
             .evaluate_value("a {input} b")?;
         assert!(result.contains("lib.rs"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_expand_machine_id() -> Result<()> {
+        let expand = Expand::new().machine_id().await?;
+        let expanded = expand.evaluate_value("{machine_id}")?;
+        // Check that "{machine_id}" expands to a valid UUID, but don't worry about the actual value.
+        Uuid::parse_str(&expanded)?;
         Ok(())
     }
 }

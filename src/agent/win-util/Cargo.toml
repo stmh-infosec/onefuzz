@@ -9,10 +9,10 @@ license = "MIT"
 anyhow = "1.0"
 atexit = { path = "../atexit" }
 log = "0.4"
-os_pipe = "0.9"
+os_pipe = "1.0"
 
 [target.'cfg(windows)'.dependencies]
-winreg = "0.9"
+winreg = "0.10"
 
 [dependencies.winapi]
 version = "0.3"

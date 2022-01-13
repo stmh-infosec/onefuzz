@@ -20,13 +20,6 @@ use storage_queue::{QueueClient, EMPTY_QUEUE_DELAY};
 use tokio::process::Command;
 
 #[derive(Debug, Deserialize)]
-struct QueueMessage {
-    content_length: u32,
-
-    url: Url,
-}
-
-#[derive(Debug, Deserialize)]
 pub struct Config {
     pub supervisor_exe: String,
     pub supervisor_options: Vec<String>,
@@ -131,6 +124,8 @@ async fn try_delete_blob(input_url: Url) -> Result<()> {
 
 async fn merge(config: &Config, output_dir: impl AsRef<Path>) -> Result<()> {
     let expand = Expand::new()
+        .machine_id()
+        .await?
         .input_marker(&config.supervisor_input_marker)
         .input_corpus(&config.unique_inputs.local_path)
         .target_options(&config.target_options)
