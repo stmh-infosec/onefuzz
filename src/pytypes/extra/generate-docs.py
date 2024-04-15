@@ -3,6 +3,8 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License.
 
+import datetime
+import json
 import sys
 from typing import List, Optional
 from uuid import UUID
@@ -65,7 +67,7 @@ from onefuzztypes.models import (
     UserInfo,
 )
 from onefuzztypes.primitives import Container, PoolName, Region
-from onefuzztypes.webhooks import WebhookMessage
+from onefuzztypes.webhooks import WebhookMessage, WebhookMessageEventGrid
 
 EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 ZERO_SHA256 = "0" * len(EMPTY_SHA256)
@@ -121,6 +123,9 @@ def main() -> None:
         job_id=UUID(int=0),
         scariness_score=10,
         scariness_description="example-scariness",
+        tool_name="libfuzzer",
+        tool_version="1.2.3",
+        onefuzz_version="1.2.3",
     )
     examples: List[Event] = [
         EventPing(ping_id=UUID(int=0)),
@@ -147,7 +152,11 @@ def main() -> None:
         EventTaskFailed(
             job_id=UUID(int=0),
             task_id=UUID(int=0),
-            error=Error(code=ErrorCode.TASK_FAILED, errors=["example error message"]),
+            error=Error(
+                code=ErrorCode.TASK_FAILED.value,
+                title="TASK_FAILED",
+                errors=["example error message"],
+            ),
             user_info=UserInfo(
                 application_id=UUID(int=0),
                 object_id=UUID(int=0),
@@ -166,7 +175,11 @@ def main() -> None:
         EventProxyFailed(
             region=Region("eastus"),
             proxy_id=UUID(int=0),
-            error=Error(code=ErrorCode.PROXY_FAILED, errors=["example error message"]),
+            error=Error(
+                code=ErrorCode.PROXY_FAILED.value,
+                title="PROXY_FAILED",
+                errors=["example error message"],
+            ),
         ),
         EventProxyStateUpdated(
             region=Region("eastus"),
@@ -181,28 +194,30 @@ def main() -> None:
         ),
         EventPoolDeleted(pool_name=PoolName("example")),
         EventScalesetCreated(
-            scaleset_id=UUID(int=0),
+            scaleset_id="example-000",
             pool_name=PoolName("example"),
             vm_sku="Standard_D2s_v3",
-            image="Canonical:UbuntuServer:18.04-LTS:latest",
+            image="Canonical:0001-com-ubuntu-server-jammy:22_04-lts:latest",
             region=Region("eastus"),
             size=10,
         ),
         EventScalesetFailed(
-            scaleset_id=UUID(int=0),
+            scaleset_id="example-000",
             pool_name=PoolName("example"),
             error=Error(
-                code=ErrorCode.UNABLE_TO_RESIZE, errors=["example error message"]
+                code=ErrorCode.UNABLE_TO_RESIZE.value,
+                title="UNABLE_TO_RESIZE",
+                errors=["example error message"],
             ),
         ),
-        EventScalesetDeleted(scaleset_id=UUID(int=0), pool_name=PoolName("example")),
+        EventScalesetDeleted(scaleset_id="example-000", pool_name=PoolName("example")),
         EventScalesetStateUpdated(
-            scaleset_id=UUID(int=0),
+            scaleset_id="example-000",
             pool_name=PoolName("example"),
             state=ScalesetState.init,
         ),
         EventScalesetResizeScheduled(
-            scaleset_id=UUID(int=0), pool_name=PoolName("example"), size=0
+            scaleset_id="example-000", pool_name=PoolName("example"), size=0
         ),
         EventJobCreated(
             job_id=UUID(int=0),
@@ -226,12 +241,14 @@ def main() -> None:
                     task_id=UUID(int=0),
                     task_type=TaskType.libfuzzer_fuzz,
                     error=Error(
-                        code=ErrorCode.TASK_FAILED, errors=["example error message"]
+                        code=ErrorCode.TASK_FAILED.value,
+                        title="TASK_FAILED",
+                        errors=["example error message"],
                     ),
                 ),
                 JobTaskStopped(
                     task_id=UUID(int=1),
-                    task_type=TaskType.libfuzzer_coverage,
+                    task_type=TaskType.coverage,
                 ),
             ],
         ),
@@ -290,6 +307,25 @@ def main() -> None:
         instance_name="example",
     )
 
+    message_event_grid = WebhookMessageEventGrid(
+        dataVersion="1.0.0",
+        subject="example",
+        eventType=EventType.ping,
+        eventTime=datetime.datetime.min,
+        id=UUID(int=0),
+        data=EventPing(ping_id=UUID(int=0)),
+    )
+
+    message_event_grid_json = json.dumps(
+        [
+            json.loads(
+                message_event_grid.json(indent=4, exclude_none=True, sort_keys=True)
+            )
+        ],
+        indent=4,
+        sort_keys=True,
+    )
+
     result = ""
     result += layer(
         1,
@@ -309,6 +345,21 @@ def main() -> None:
         message.json(indent=4, exclude_none=True, sort_keys=True),
         "json",
     )
+
+    result += layer(
+        2,
+        "Event Grid Payload format",
+        "If webhook is set to have Event Grid message format then "
+        "the payload will look as follows:",
+    )
+
+    result += typed(
+        3,
+        "Example",
+        message_event_grid_json,
+        "json",
+    )
+
     result += layer(2, "Event Types (EventType)")
 
     event_map = {get_event_type(x).name: x for x in examples}

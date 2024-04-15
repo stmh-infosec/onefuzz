@@ -3,10 +3,12 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 from uuid import UUID
 
 from pydantic import AnyHttpUrl, BaseModel, Field, root_validator
+
+from onefuzztypes import models
 
 from ._monkeypatch import _check_hotfix
 from .consts import ONE_HOUR, SEVEN_DAYS
@@ -20,8 +22,16 @@ from .enums import (
     TaskState,
 )
 from .events import EventType
-from .models import AutoScaleConfig, InstanceConfig, NotificationConfig
+from .models import (
+    AutoScaleConfig,
+    InstanceConfig,
+    NotificationConfig,
+    RegressionReport,
+    Report,
+    TemplateRenderContext,
+)
 from .primitives import Container, PoolName, Region
+from .webhooks import WebhookMessageFormat
 
 
 class BaseRequest(BaseModel):
@@ -30,13 +40,13 @@ class BaseRequest(BaseModel):
 
 class JobGet(BaseRequest):
     job_id: UUID
+    with_tasks: Optional[bool]
 
 
 class JobSearch(BaseRequest):
     job_id: Optional[UUID]
     state: Optional[List[JobState]]
     task_state: Optional[List[TaskState]]
-    with_tasks: Optional[bool]
 
 
 class NotificationCreate(BaseRequest, NotificationConfig):
@@ -46,6 +56,7 @@ class NotificationCreate(BaseRequest, NotificationConfig):
 
 class NotificationSearch(BaseRequest):
     container: Optional[List[Container]]
+    notification_id: Optional[UUID]
 
 
 class NotificationGet(BaseRequest):
@@ -81,7 +92,7 @@ class AgentRegistrationGet(BaseRequest):
 
 class AgentRegistrationPost(BaseRequest):
     pool_name: PoolName
-    scaleset_id: Optional[UUID]
+    scaleset_id: Optional[str]
     machine_id: UUID
     version: str = Field(default="1.0.0")
 
@@ -91,8 +102,13 @@ class PoolCreate(BaseRequest):
     os: OS
     arch: Architecture
     managed: bool
-    client_id: Optional[UUID]
+    object_id: Optional[UUID]
     autoscale: Optional[AutoScaleConfig]
+
+
+class PoolUpdate(BaseRequest):
+    name: PoolName
+    object_id: Optional[UUID]
 
 
 class PoolSearch(BaseRequest):
@@ -107,7 +123,7 @@ class PoolStop(BaseRequest):
 
 
 class ProxyGet(BaseRequest):
-    scaleset_id: Optional[UUID]
+    scaleset_id: Optional[str]
     machine_id: Optional[UUID]
     dst_port: Optional[int]
 
@@ -124,14 +140,14 @@ class ProxyGet(BaseRequest):
 
 
 class ProxyCreate(BaseRequest):
-    scaleset_id: UUID
+    scaleset_id: str
     machine_id: UUID
     dst_port: int
     duration: int = Field(ge=ONE_HOUR, le=SEVEN_DAYS)
 
 
 class ProxyDelete(BaseRequest):
-    scaleset_id: UUID
+    scaleset_id: str
     machine_id: UUID
     dst_port: Optional[int]
 
@@ -139,7 +155,7 @@ class ProxyDelete(BaseRequest):
 class NodeSearch(BaseRequest):
     machine_id: Optional[UUID]
     state: Optional[List[NodeState]]
-    scaleset_id: Optional[UUID]
+    scaleset_id: Optional[str]
     pool_name: Optional[PoolName]
 
 
@@ -153,30 +169,41 @@ class NodeUpdate(BaseRequest):
 
 
 class ScalesetSearch(BaseRequest):
-    scaleset_id: Optional[UUID]
+    scaleset_id: Optional[str]
     state: Optional[List[ScalesetState]]
     include_auth: bool = Field(default=False)
 
 
 class ScalesetStop(BaseRequest):
-    scaleset_id: UUID
+    scaleset_id: str
     now: bool
 
 
 class ScalesetUpdate(BaseRequest):
-    scaleset_id: UUID
+    scaleset_id: str
     size: Optional[int] = Field(ge=1)
+
+
+class AutoScaleOptions(BaseModel):
+    min: int = Field(ge=0)
+    max: int = Field(ge=1)
+    default: int = Field(ge=0)
+    scale_out_amount: int = Field(ge=1)
+    scale_out_cooldown: int = Field(ge=1)
+    scale_in_amount: int = Field(ge=1)
+    scale_in_cooldown: int = Field(ge=1)
 
 
 class ScalesetCreate(BaseRequest):
     pool_name: PoolName
     vm_sku: str
-    image: str
+    image: Optional[str]
     region: Optional[Region]
     size: int = Field(ge=1)
     spot_instances: bool
     ephemeral_os_disks: bool = Field(default=False)
     tags: Dict[str, str]
+    auto_scale: Optional[AutoScaleOptions]
 
 
 class ContainerGet(BaseRequest):
@@ -191,6 +218,11 @@ class ContainerCreate(BaseRequest):
 class ContainerDelete(BaseRequest):
     name: Container
     metadata: Optional[Dict[str, str]]
+
+
+class ContainerUpdate(BaseRequest):
+    name: Container
+    metadata: Dict[str, str]
 
 
 class ReproGet(BaseRequest):
@@ -211,6 +243,7 @@ class WebhookCreate(BaseRequest):
     url: AnyHttpUrl
     event_types: List[EventType]
     secret_token: Optional[str]
+    message_format: Optional[WebhookMessageFormat]
 
 
 class WebhookSearch(BaseModel):
@@ -227,6 +260,7 @@ class WebhookUpdate(BaseModel):
     event_types: Optional[List[EventType]]
     url: Optional[AnyHttpUrl]
     secret_token: Optional[str]
+    message_format: Optional[WebhookMessageFormat]
 
 
 class NodeAddSshKey(BaseModel):
@@ -236,6 +270,24 @@ class NodeAddSshKey(BaseModel):
 
 class InstanceConfigUpdate(BaseModel):
     config: InstanceConfig
+
+
+class TemplateValidationPost(BaseModel):
+    template: str
+    context: Optional[TemplateRenderContext]
+
+
+class JinjaToScribanMigrationPost(BaseModel):
+    dry_run: bool = Field(default=False)
+
+
+class EventsGet(BaseModel):
+    event_id: UUID
+
+
+class NotificationTest(BaseModel):
+    report: Union[Report, RegressionReport]
+    notification: models.Notification
 
 
 _check_hotfix()

@@ -1,4 +1,27 @@
-# OneFuzz
+# <img src="docs/onefuzz_text.svg" height="120" alt="OneFuzz" />
+
+# :exclamation: IMPORTANT NOTICE :exclamation:
+
+**_August 31, 2023_**.
+
+**_Since September 2020 when OneFuzz was first open sourced, we’ve been on a journey to create a best-in-class orchestrator for running fuzzers, driving security and quality into our products._**
+ 
+ 
+**_Initially launched by a small group in MSR, OneFuzz has now become a significant internal platform within Microsoft. As such, we are regretfully archiving the project to focus our attention on becoming a more deeply integrated service within the company. Unfortunately, we aren’t a large enough team to live in both the open-source world and the internal Microsoft world with its own unique set of requirements._**
+ 
+**_Our current plan is to archive the project in the next few months. That means we’ll still be making updates for a little while. Of course, even after it’s archived, you’ll still be able to fork it and make the changes you need. Once we’ve decided on a specific date for archiving, we’ll update this readme._**
+ 
+**_Thanks for taking the journey with us._**
+
+**_The OneFuzz team._**
+
+---
+**_Update: September 15 2023:_**
+**_Our current target to archive the project is September 30th, 2023._**
+
+---
+
+[![Onefuzz build status](https://github.com/microsoft/onefuzz/workflows/Build/badge.svg?branch=main)](https://github.com/microsoft/onefuzz/actions/workflows/ci.yml?query=branch%3Amain)
 
 ## A self-hosted Fuzzing-As-A-Service platform
 
@@ -8,14 +31,10 @@ command](docs/getting-started.md#launching-a-job), which can be [baked into
 CICD](contrib/onefuzz-job-github-actions/README.md), developers can launch
 fuzz jobs from a few virtual machines to thousands of cores.
 
-## Build Status
-
-![Build Onefuzz](https://github.com/microsoft/onefuzz/workflows/Build/badge.svg?branch=main)
-
 ## Features
 
 * **Composable fuzzing workflows**: Open source allows users to onboard their own 
-   fuzzers, [swap instrumentation](docs/custom-analysis.md), and manage seed inputs.
+   fuzzers, [swap instrumentation](docs/custom-analysis.md), and manage seed inputs. 
 * **Built-in ensemble fuzzing**: By default, fuzzers work as a team to share strengths, 
    swapping inputs of interest between fuzzing technologies.
 * **Programmatic triage and result de-duplication**: It provides unique flaw cases that 

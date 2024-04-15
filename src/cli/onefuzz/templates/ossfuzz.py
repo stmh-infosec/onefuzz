@@ -11,7 +11,7 @@ from typing import Dict, List, Optional, Tuple
 
 from onefuzztypes.enums import OS, ContainerType, TaskDebugFlag
 from onefuzztypes.models import NotificationConfig
-from onefuzztypes.primitives import File, PoolName
+from onefuzztypes.primitives import Container, File, PoolName
 
 from onefuzz.api import Command
 from onefuzz.backend import container_file_path
@@ -119,6 +119,8 @@ class OssFuzz(Command):
         notification_config: Optional[NotificationConfig] = None,
         debug: Optional[List[TaskDebugFlag]] = None,
         ensemble_sync_delay: Optional[int] = None,
+        extra_setup_container: Optional[Container] = None,
+        min_available_memory_mb: Optional[int] = None,
     ) -> None:
         """
         OssFuzz style libfuzzer jobs
@@ -183,7 +185,8 @@ class OssFuzz(Command):
         )
         base_helper.platform = platform
 
-        helpers = []
+        job = base_helper.create_job()
+
         for fuzzer in [File(x) for x in fuzzers]:
             fuzzer_name = fuzzer.replace(".exe", "").replace("_fuzzer", "")
             self.logger.info("creating tasks for %s", fuzzer)
@@ -195,14 +198,12 @@ class OssFuzz(Command):
                 fuzzer_name,
                 build,
                 duration,
-                job=base_helper.job,
                 pool_name=pool_name,
                 target_exe=fuzzer,
             )
             helper.platform = platform
             helper.add_tags(tags)
             helper.platform = base_helper.platform
-            helper.job = base_helper.job
             helper.define_containers(
                 ContainerType.setup,
                 ContainerType.inputs,
@@ -212,11 +213,17 @@ class OssFuzz(Command):
                 ContainerType.no_repro,
                 ContainerType.coverage,
             )
+
+            if extra_setup_container is not None:
+                helper.add_existing_container(
+                    ContainerType.extra_setup, extra_setup_container
+                )
+
             helper.create_containers()
             helper.setup_notifications(notification_config)
 
             dst_sas = self.onefuzz.containers.get(
-                helper.containers[ContainerType.setup]
+                helper.containers[ContainerType.setup].name
             ).sas_url
             self._copy_exe(container_sas["build"], dst_sas, File(fuzzer))
             self._copy_all(container_sas["base"], dst_sas)
@@ -239,8 +246,8 @@ class OssFuzz(Command):
             fuzzer_blob_name = helper.setup_relative_blob_name(fuzzer, None)
 
             self.onefuzz.template.libfuzzer._create_tasks(
-                job=base_helper.job,
-                containers=helper.containers,
+                job=job,
+                containers=helper.container_names(),
                 pool_name=pool_name,
                 target_exe=fuzzer_blob_name,
                 vm_count=VM_COUNT,
@@ -250,6 +257,6 @@ class OssFuzz(Command):
                 tags=helper.tags,
                 debug=debug,
                 ensemble_sync_delay=ensemble_sync_delay,
+                min_available_memory_mb=min_available_memory_mb,
             )
-            helpers.append(helper)
-        base_helper.wait()
+        base_helper.wait(job)

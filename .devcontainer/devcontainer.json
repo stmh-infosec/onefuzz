@@ -1,0 +1,52 @@
+// For format details, see https://aka.ms/devcontainer.json. For config options, see the README at:
+// https://github.com/microsoft/vscode-dev-containers/tree/v0.224.3/containers/ubuntu
+{
+	"name": "Ubuntu",
+	"build": {
+		"dockerfile": "Dockerfile"
+	},
+	"customizations": {
+		"vscode": {
+			"settings": {
+				"editor.formatOnSave": true,
+				"files.watcherExclude": {
+					"**/target/**": true
+				},
+				"lldb.executable": "/usr/bin/lldb",
+				"dotnet.server.useOmnisharp": true,
+				"omnisharp.enableEditorConfigSupport": true,
+				"omnisharp.enableRoslynAnalyzers": true,
+				"python.defaultInterpreterPath": "/workspaces/onefuzz/src/venv/bin/python",
+				"python.formatting.provider": "black",
+				"python.linting.flake8Enabled": true,
+				"python.linting.mypyEnabled": true,
+				"rust-analyzer.checkOnSave.command": "clippy",
+				"rust-analyzer.linkedProjects": [
+					"/workspaces/onefuzz/src/agent/Cargo.toml",
+					"/workspaces/onefuzz/src/proxy-manager/Cargo.toml"
+				]
+			},
+			"extensions": [
+				"formulahendry.dotnet-test-explorer",
+				"ms-azuretools.vscode-azurefunctions",
+				"ms-azuretools.vscode-bicep",
+				"ms-dotnettools.csharp",
+				"ms-python.python",
+				"mutantdino.resourcemonitor",
+				"redhat.vscode-yaml",
+				"rust-lang.rust-analyzer",
+				"serayuzgur.crates",
+				"tamasfe.even-better-toml",
+				"vadimcn.vscode-lldb"
+			]
+		}
+	},
+	// Use 'postCreateCommand' to run commands after the container is created.
+	// Run as interactive bash shell to pick up .bashrc so that direnv is set up:
+	"postCreateCommand": "bash -i .devcontainer/post-create-script.sh",
+	"remoteUser": "vscode",
+	// Note: available features are found in: https://github.com/devcontainers/features/blob/main/README.md
+	"features": {
+		"ghcr.io/devcontainers/features/azure-cli:1": {}
+	}
+}

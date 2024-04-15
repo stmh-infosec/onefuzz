@@ -6,22 +6,45 @@
 import os
 import tempfile
 import zipfile
+from datetime import timedelta
 from typing import Any, Dict, List, Optional, Tuple
 from uuid import uuid4
 
-from onefuzztypes.enums import OS, ContainerType, TaskState
+from onefuzztypes.enums import OS, ContainerType, JobState, TaskState
 from onefuzztypes.models import Job, NotificationConfig
 from onefuzztypes.primitives import Container, Directory, File
 
 from ..job_templates.job_monitor import JobMonitor
 
 ELF_MAGIC = b"\x7fELF"
-DEFAULT_LINUX_IMAGE = "Canonical:UbuntuServer:18.04-LTS:latest"
-DEFAULT_WINDOWS_IMAGE = "MicrosoftWindowsDesktop:Windows-10:20h2-pro:latest"
 
 
 class StoppedEarly(Exception):
     pass
+
+
+class ContainerTemplate:
+    def __init__(
+        self,
+        name: Container,
+        exists: bool,
+        *,
+        retention_period: Optional[timedelta] = None,
+    ):
+        self.name = name
+        self.retention_period = retention_period
+        # TODO: exists is not yet used/checked
+        self.exists = exists
+
+    @staticmethod
+    def existing(name: Container) -> "ContainerTemplate":
+        return ContainerTemplate(name, True)
+
+    @staticmethod
+    def fresh(
+        name: Container, *, retention_period: Optional[timedelta] = None
+    ) -> "ContainerTemplate":
+        return ContainerTemplate(name, False, retention_period=retention_period)
 
 
 class JobHelper:
@@ -37,7 +60,6 @@ class JobHelper:
         pool_name: Optional[str] = None,
         target_exe: File,
         platform: Optional[OS] = None,
-        job: Optional[Job] = None,
     ):
         self.onefuzz = onefuzz
         self.logger = logger
@@ -61,17 +83,32 @@ class JobHelper:
 
         self.wait_for_running: bool = False
         self.wait_for_stopped: bool = False
-        self.containers: Dict[ContainerType, Container] = {}
+        self.containers: Dict[ContainerType, ContainerTemplate] = {}
         self.tags: Dict[str, str] = {"project": project, "name": name, "build": build}
-        if job is None:
-            self.onefuzz.versions.check()
-            self.logger.info("creating job (runtime: %d hours)", duration)
-            self.job = self.onefuzz.jobs.create(
-                self.project, self.name, self.build, duration=duration
-            )
-            self.logger.info("created job: %s" % self.job.job_id)
-        else:
-            self.job = job
+        self.duration = duration
+
+    def create_job(self) -> Job:
+        self.onefuzz.versions.check()
+        self.logger.info("creating job (runtime: %d hours)", self.duration)
+        job = self.onefuzz.jobs.create(
+            self.project, self.name, self.build, duration=self.duration
+        )
+        self.logger.info("created job: %s" % job)
+        return job
+
+    def add_existing_container(
+        self, container_type: ContainerType, container: Container
+    ) -> None:
+        self.containers[container_type] = ContainerTemplate.existing(container)
+
+    def container_name(self, container_type: ContainerType) -> Container:
+        return self.containers[container_type].name
+
+    def container_names(self) -> Dict[ContainerType, Container]:
+        return {
+            container_type: container.name
+            for (container_type, container) in self.containers.items()
+        }
 
     def define_containers(self, *types: ContainerType) -> None:
         """
@@ -81,13 +118,23 @@ class JobHelper:
         """
 
         for container_type in types:
-            self.containers[container_type] = self.onefuzz.utils.build_container_name(
+            container_name = self.onefuzz.utils.build_container_name(
                 container_type=container_type,
                 project=self.project,
                 name=self.name,
                 build=self.build,
                 platform=self.platform,
             )
+            self.containers[container_type] = ContainerTemplate.fresh(
+                container_name,
+                retention_period=JobHelper._default_retention_period(container_type),
+            )
+
+    @staticmethod
+    def _default_retention_period(container_type: ContainerType) -> Optional[timedelta]:
+        if container_type == ContainerType.crashdumps:
+            return timedelta(days=90)
+        return None
 
     def get_unique_container_name(self, container_type: ContainerType) -> Container:
         return Container(
@@ -99,11 +146,17 @@ class JobHelper:
         )
 
     def create_containers(self) -> None:
-        for (container_type, container_name) in self.containers.items():
-            self.logger.info("using container: %s", container_name)
-            self.onefuzz.containers.create(
-                container_name, metadata={"container_type": container_type.name}
-            )
+        for container_type, container in self.containers.items():
+            self.logger.info("using container: %s", container.name)
+            metadata = {"container_type": container_type.name}
+            if container.retention_period is not None:
+                # format as ISO8601 period
+                # NB: this must match the value used on the server side
+                metadata[
+                    "onefuzz_retentionperiod"
+                ] = f"P{container.retention_period.days}D"
+
+            self.onefuzz.containers.create(container.name, metadata=metadata)
 
     def delete_container(self, container_name: Container) -> None:
         self.onefuzz.containers.delete(container_name)
@@ -112,14 +165,18 @@ class JobHelper:
         if not config:
             return
 
-        container: Optional[str] = None
+        containers: List[Container] = []
         if ContainerType.unique_reports in self.containers:
-            container = self.containers[ContainerType.unique_reports]
+            containers.append(self.container_name(ContainerType.unique_reports))
         else:
-            container = self.containers[ContainerType.reports]
+            containers.append(self.container_name(ContainerType.reports))
 
-        self.logger.info("creating notification config for %s", container)
-        self.onefuzz.notifications.create(container, config, replace_existing=True)
+        if ContainerType.regression_reports in self.containers:
+            containers.append(self.container_name(ContainerType.regression_reports))
+
+        for container in containers:
+            self.logger.info("creating notification config for %s", container)
+            self.onefuzz.notifications.create(container, config, replace_existing=True)
 
     def upload_setup(
         self,
@@ -139,25 +196,25 @@ class JobHelper:
 
             self.logger.info("uploading setup dir `%s`" % setup_dir)
             self.onefuzz.containers.files.upload_dir(
-                self.containers[ContainerType.setup], setup_dir
+                self.container_name(ContainerType.setup), setup_dir
             )
         else:
             self.logger.info("uploading target exe `%s`" % target_exe)
             self.onefuzz.containers.files.upload_file(
-                self.containers[ContainerType.setup], target_exe
+                self.container_name(ContainerType.setup), target_exe
             )
 
             pdb_path = os.path.splitext(target_exe)[0] + ".pdb"
             if os.path.exists(pdb_path):
                 pdb_name = os.path.basename(pdb_path)
                 self.onefuzz.containers.files.upload_file(
-                    self.containers[ContainerType.setup], pdb_path, pdb_name
+                    self.container_name(ContainerType.setup), pdb_path, pdb_name
                 )
         if setup_files:
             for filename in setup_files:
                 self.logger.info("uploading %s", filename)
                 self.onefuzz.containers.files.upload_file(
-                    self.containers[ContainerType.setup], filename
+                    self.container_name(ContainerType.setup), filename
                 )
 
     def upload_inputs(self, path: Directory, read_only: bool = False) -> None:
@@ -165,7 +222,9 @@ class JobHelper:
         container_type = ContainerType.inputs
         if read_only:
             container_type = ContainerType.readonly_inputs
-        self.onefuzz.containers.files.upload_dir(self.containers[container_type], path)
+        self.onefuzz.containers.files.upload_dir(
+            self.container_name(container_type), path
+        )
 
     def upload_inputs_zip(self, path: File) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -174,15 +233,8 @@ class JobHelper:
 
             self.logger.info("uploading inputs from zip: `%s`" % path)
             self.onefuzz.containers.files.upload_dir(
-                self.containers[ContainerType.inputs], Directory(tmp_dir)
+                self.container_name(ContainerType.inputs), Directory(tmp_dir)
             )
-
-    @classmethod
-    def get_image(_cls, platform: OS) -> str:
-        if platform == OS.linux:
-            return DEFAULT_LINUX_IMAGE
-        else:
-            return DEFAULT_WINDOWS_IMAGE
 
     @classmethod
     def get_platform(_cls, target_exe: File) -> OS:
@@ -200,32 +252,32 @@ class JobHelper:
             wait_for_files = []
 
         self.to_monitor = {
-            self.containers[x]: len(
-                self.onefuzz.containers.files.list(self.containers[x]).files
+            self.container_name(x): len(
+                self.onefuzz.containers.files.list(self.container_name(x)).files
             )
             for x in wait_for_files
         }
         self.wait_for_running = wait_for_running
 
-    def check_current_job(self) -> Job:
-        job = self.onefuzz.jobs.get(self.job.job_id)
-        if job.state in ["stopped", "stopping"]:
+    def check_current_job(self, job: Job) -> Job:
+        if job.state in JobState.shutting_down():
             raise StoppedEarly("job unexpectedly stopped early")
 
         errors = []
-        for task in self.onefuzz.tasks.list(job_id=self.job.job_id):
-            if task.state in ["stopped", "stopping"]:
-                if task.error:
-                    errors.append("%s: %s" % (task.config.task.type, task.error))
-                else:
-                    errors.append("%s" % task.config.task.type)
+        for task in self.onefuzz.tasks.list(
+            job_id=job.job_id, state=TaskState.shutting_down()
+        ):
+            if task.error:
+                errors.append("%s: %s" % (task.config.task.type, task.error))
+            else:
+                errors.append("%s" % task.config.task.type)
 
         if errors:
             raise StoppedEarly("tasks stopped unexpectedly.\n%s" % "\n".join(errors))
         return job
 
-    def get_waiting(self) -> List[str]:
-        tasks = self.onefuzz.tasks.list(job_id=self.job.job_id)
+    def get_waiting(self, job: Job) -> List[str]:
+        tasks = self.onefuzz.tasks.list(job_id=job.job_id)
         waiting = [
             "%s:%s" % (x.config.task.type.name, x.state.name)
             for x in tasks
@@ -233,12 +285,12 @@ class JobHelper:
         ]
         return waiting
 
-    def is_running(self) -> Tuple[bool, str, Any]:
-        waiting = self.get_waiting()
+    def is_running(self, job: Job) -> Tuple[bool, str, Any]:
+        waiting = self.get_waiting(job)
         return (not waiting, "waiting on: %s" % ", ".join(sorted(waiting)), None)
 
-    def has_files(self) -> Tuple[bool, str, Any]:
-        self.check_current_job()
+    def has_files(self, job: Job) -> Tuple[bool, str, Any]:
+        self.check_current_job(job)
 
         new = {
             x: len(self.onefuzz.containers.files.list(x).files)
@@ -254,8 +306,8 @@ class JobHelper:
             None,
         )
 
-    def wait(self) -> None:
-        JobMonitor(self.onefuzz, self.job).wait(
+    def wait(self, job: Job) -> None:
+        JobMonitor(self.onefuzz, job).wait(
             wait_for_running=self.wait_for_running,
             wait_for_files=self.to_monitor,
             wait_for_stopped=self.wait_for_stopped,

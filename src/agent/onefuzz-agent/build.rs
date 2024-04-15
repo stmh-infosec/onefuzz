@@ -9,8 +9,8 @@ use std::{env, process::Stdio};
 
 fn run_cmd(args: &[&str]) -> Result<String, Box<dyn Error>> {
     let cmd = Command::new(args[0])
-        .args(&args[1..])
         .stdin(Stdio::null())
+        .args(&args[1..])
         .output()?;
     if cmd.status.success() {
         Ok(String::from_utf8_lossy(&cmd.stdout).trim().to_string())
@@ -29,15 +29,15 @@ fn read_file(filename: &str) -> Result<String, Box<dyn Error>> {
 }
 
 fn print_values(version: &str, sha: &str) {
-    println!("cargo:rustc-env=ONEFUZZ_VERSION={}", version);
-    println!("cargo:rustc-env=GIT_VERSION={}", sha);
+    println!("cargo:rustc-env=ONEFUZZ_VERSION={version}");
+    println!("cargo:rustc-env=GIT_VERSION={sha}");
 }
 
 fn print_version(include_sha: bool, include_local: bool, sha: &str) -> Result<(), Box<dyn Error>> {
     let mut version = read_file("../../../CURRENT_VERSION")?;
 
     if include_sha {
-        version.push('-');
+        version.push('+');
         version.push_str(sha);
 
         // if we're a non-release build, check to see if git has

@@ -16,10 +16,11 @@ import time
 import uuid
 import zipfile
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple, Union, cast
+from typing import Any, Dict, List, Optional, Tuple, Union, cast
 from uuid import UUID
 
 from azure.common.credentials import get_cli_profile
+from azure.core.exceptions import ResourceNotFoundError
 from azure.cosmosdb.table.tableservice import TableService
 from azure.identity import AzureCliCredential
 from azure.mgmt.applicationinsights import ApplicationInsightsManagementClient
@@ -27,12 +28,6 @@ from azure.mgmt.applicationinsights.models import (
     ApplicationInsightsComponentExportRequest,
 )
 from azure.mgmt.eventgrid import EventGridManagementClient
-from azure.mgmt.eventgrid.models import (
-    EventSubscription,
-    EventSubscriptionFilter,
-    RetryPolicy,
-    StorageQueueEventSubscriptionDestination,
-)
 from azure.mgmt.resource import ResourceManagementClient, SubscriptionClient
 from azure.mgmt.resource.resources.models import (
     Deployment,
@@ -48,8 +43,9 @@ from azure.storage.blob import (
 from msrest.serialization import TZ_UTC
 
 from deploylib.configuration import (
+    Config,
     InstanceConfigClient,
-    NetworkSecurityConfig,
+    NsgRule,
     parse_rules,
     update_admins,
     update_allowed_aad_tenants,
@@ -66,7 +62,6 @@ from deploylib.registration import (
     get_application,
     get_service_principal,
     get_signed_in_user,
-    get_tenant_id,
     query_microsoft_graph,
     register_application,
     set_app_audience,
@@ -79,11 +74,6 @@ from deploylib.registration import (
 USER_READ_PERMISSION = "e1fe6dd8-ba31-4d61-89e7-88639da4683d"
 MICROSOFT_GRAPH_APP_ID = "00000003-0000-0000-c000-000000000000"
 
-ONEFUZZ_CLI_APP = "72f1562a-8c0c-41ea-beb9-fa2b71c80134"
-ONEFUZZ_CLI_AUTHORITY = (
-    "https://login.microsoftonline.com/72f988bf-86f1-41af-91ab-2d7cd011db47"
-)
-COMMON_AUTHORITY = "https://login.microsoftonline.com/common"
 TELEMETRY_NOTICE = (
     "Telemetry collection on stats and OneFuzz failures are sent to Microsoft. "
     "To disable, delete the ONEFUZZ_TELEMETRY application setting in the "
@@ -95,8 +85,14 @@ AZCOPY_MISSING_ERROR = (
 )
 FUNC_TOOLS_ERROR = (
     "azure-functions-core-tools is not installed, "
-    "install v3 using instructions: "
+    "install v4 using instructions: "
     "https://github.com/Azure/azure-functions-core-tools#installing"
+)
+
+UPPERCASE_NAME_ERROR = (
+    "OneFuzz deployments do not support uppercase characters in "
+    "application names. Please adjust the value you are "
+    "specifying for this argument and retry."
 )
 
 logger = logging.getLogger("deploy")
@@ -104,6 +100,31 @@ logger = logging.getLogger("deploy")
 
 def gen_guid() -> str:
     return str(uuid.uuid4())
+
+
+def bicep_to_arm(bicep_template: str) -> str:
+    from azure.cli.core import get_default_cli
+
+    az_cli = get_default_cli()
+    az_cli.invoke(["bicep", "install"])
+    az_cli.invoke(
+        [
+            "bicep",
+            "build",
+            "--file",
+            bicep_template,
+            "--outfile",
+            "azuredeploy-bicep.json",
+        ]
+    )
+    from importlib import reload
+
+    # az_cli hijacks logging, so need to reset it
+    logging.shutdown()
+    reload(logging)
+    global logger
+    logger = logging.getLogger("deploy")
+    return "azuredeploy-bicep.json"
 
 
 class Client:
@@ -114,54 +135,74 @@ class Client:
         location: str,
         application_name: str,
         owner: str,
-        nsg_config: str,
+        config: str,
         client_id: Optional[str],
         client_secret: Optional[str],
         app_zip: str,
         tools: str,
         instance_specific: str,
         third_party: str,
-        arm_template: str,
+        bicep_template: str,
         workbook_data: str,
         create_registration: bool,
         migrations: List[str],
         export_appinsights: bool,
-        multi_tenant_domain: str,
-        upgrade: bool,
+        skip_aad_setup: bool,
         subscription_id: Optional[str],
         admins: List[UUID],
         allowed_aad_tenants: List[UUID],
+        auto_create_cli_app: bool,
+        host_dotnet_on_windows: bool,
+        enable_profiler: bool,
+        custom_domain: Optional[str],
     ):
         self.subscription_id = subscription_id
         self.resource_group = resource_group
-        self.arm_template = arm_template
         self.location = location
         self.application_name = application_name
         self.owner = owner
-        self.nsg_config = nsg_config
+        self.config = config
         self.app_zip = app_zip
         self.tools = tools
         self.instance_specific = instance_specific
         self.third_party = third_party
         self.create_registration = create_registration
-        self.multi_tenant_domain = multi_tenant_domain
-        self.upgrade = upgrade
+        self.custom_domain = custom_domain
+        self.skip_aad_setup = skip_aad_setup
         self.results: Dict = {
             "client_id": client_id,
             "client_secret": client_secret,
-        }
-        if self.multi_tenant_domain:
-            authority = COMMON_AUTHORITY
-        else:
-            authority = ONEFUZZ_CLI_AUTHORITY
-        self.cli_config: Dict[str, Union[str, UUID]] = {
-            "client_id": ONEFUZZ_CLI_APP,
-            "authority": authority,
         }
         self.migrations = migrations
         self.export_appinsights = export_appinsights
         self.admins = admins
         self.allowed_aad_tenants = allowed_aad_tenants
+
+        self.arm_template = bicep_to_arm(bicep_template)
+
+        self.auto_create_cli_app = auto_create_cli_app
+        self.host_dotnet_on_windows = host_dotnet_on_windows
+        self.enable_profiler = enable_profiler
+
+        self.rules: List[NsgRule] = []
+
+        self.cli_app_id = ""
+        self.authority = ""
+        self.tenant_id = ""
+        self.tenant_domain = ""
+        self.multi_tenant_domain = ""
+
+        self.cli_config: Dict[str, Union[str, UUID]] = {
+            "client_id": "",
+            "authority": "",
+        }
+
+        self.func_name = ""
+        self.func_id = ""
+        self.func_key = ""
+        self.fuzz_name = ""
+        self.fuzz_id = ""
+        self.fuzz_key = ""
 
         machine = platform.machine()
         system = platform.system()
@@ -176,7 +217,7 @@ class Client:
             if not azcopy:
                 raise Exception(AZCOPY_MISSING_ERROR)
             else:
-                logger.warn("unable to use built-in azcopy, using system install")
+                logger.warning("unable to use built-in azcopy, using system install")
                 self.azcopy = azcopy
 
         with open(workbook_data) as f:
@@ -216,37 +257,42 @@ class Client:
         client = ResourceManagementClient(
             credential, subscription_id=self.get_subscription_id()
         )
-        providers = {x.namespace: x for x in client.providers.list()}
-
+        providers = {x.namespace.lower(): x for x in client.providers.list()}
         unsupported = []
 
+        # we cannot validate site/config resources since they require resource group
+        # to exist. check_region only validates subscription level resources.
+        resource_group_level_resources = ["sites/config"]
+
         for resource in arm["resources"]:
-            namespace, name = resource["type"].split("/", 1)
+            namespace, name = resource["type"].lower().split("/", 1)
 
             # resource types are in the form of a/b/c....
             # only the top two are listed as resource types within providers
             name = "/".join(name.split("/")[:2])
-
             if namespace not in providers:
                 unsupported.append("Unsupported provider: %s" % namespace)
                 continue
 
             provider = providers[namespace]
-            resource_types = {x.resource_type: x for x in provider.resource_types}
-            if name not in resource_types:
-                unsupported.append(
-                    "Unsupported resource type: %s/%s" % (namespace, name)
-                )
-                continue
+            resource_types = {
+                x.resource_type.lower(): x for x in provider.resource_types
+            }
+            if name not in resource_group_level_resources:
+                if name not in resource_types:
+                    unsupported.append(
+                        "Unsupported resource type: %s/%s" % (namespace, name)
+                    )
+                    continue
 
-            resource_type = resource_types[name]
-            if (
-                location not in resource_type.locations
-                and len(resource_type.locations) > 0
-            ):
-                unsupported.append(
-                    "%s/%s is unsupported in %s" % (namespace, name, self.location)
-                )
+                resource_type = resource_types[name]
+                if (
+                    location not in resource_type.locations
+                    and len(resource_type.locations) > 0
+                ):
+                    unsupported.append(
+                        "%s/%s is unsupported in %s" % (namespace, name, self.location)
+                    )
 
         if unsupported:
             print("The following resources required by onefuzz are not supported:")
@@ -262,11 +308,8 @@ class Client:
         # The url to access the instance
         # This also represents the legacy identifier_uris of the application
         # registration
-        if self.multi_tenant_domain:
-            return "https://%s/%s" % (
-                self.multi_tenant_domain,
-                self.application_name,
-            )
+        if self.multi_tenant_domain != "":
+            return "https://%s/%s" % (self.multi_tenant_domain, self.application_name)
         else:
             return "https://%s.azurewebsites.net" % self.application_name
 
@@ -276,17 +319,14 @@ class Client:
         # to be from an approved domain The format of this value is derived
         # from the default value proposed by azure when creating an application
         # registration api://{guid}/...
-        if self.multi_tenant_domain:
-            return "api://%s/%s" % (
-                self.multi_tenant_domain,
-                self.application_name,
-            )
+        if self.multi_tenant_domain != "":
+            return "api://%s/%s" % (self.multi_tenant_domain, self.application_name)
         else:
             return "api://%s.azurewebsites.net" % self.application_name
 
     def get_signin_audience(self) -> str:
         # https://docs.microsoft.com/en-us/azure/active-directory/develop/supported-accounts-validation
-        if self.multi_tenant_domain:
+        if self.multi_tenant_domain != "":
             return "AzureADMultipleOrgs"
         else:
             return "AzureADMyOrg"
@@ -316,7 +356,7 @@ class Client:
             },
             {
                 "allowedMemberTypes": ["Application"],
-                "description": "Allow access from a lab machine.",
+                "description": "Allow access from a managed node.",
                 "displayName": OnefuzzAppRole.ManagedNode.value,
                 "id": str(uuid.uuid4()),
                 "isEnabled": True,
@@ -324,141 +364,28 @@ class Client:
             },
             {
                 "allowedMemberTypes": ["User"],
-                "description": "Allows user access from the CLI.",
+                "description": "Allows user to access the OneFuzz instance.",
                 "displayName": OnefuzzAppRole.UserAssignment.value,
                 "id": str(uuid.uuid4()),
                 "isEnabled": True,
                 "value": OnefuzzAppRole.UserAssignment.value,
             },
+            {
+                "allowedMemberTypes": ["Application"],
+                "description": "Allow access from an unmanaged node.",
+                "displayName": OnefuzzAppRole.UnmanagedNode.value,
+                "id": str(uuid.uuid4()),
+                "isEnabled": True,
+                "value": OnefuzzAppRole.UnmanagedNode.value,
+            },
         ]
 
         if not app:
-            logger.info("creating Application registration")
-
-            params = {
-                "displayName": self.application_name,
-                "identifierUris": [self.get_identifier_url()],
-                "signInAudience": self.get_signin_audience(),
-                "appRoles": app_roles,
-                "api": {
-                    "oauth2PermissionScopes": [
-                        {
-                            "adminConsentDescription": f"Allow the application to access {self.application_name} on behalf of the signed-in user.",
-                            "adminConsentDisplayName": f"Access {self.application_name}",
-                            "id": str(uuid.uuid4()),
-                            "isEnabled": True,
-                            "type": "User",
-                            "userConsentDescription": f"Allow the application to access {self.application_name} on your behalf.",
-                            "userConsentDisplayName": f"Access {self.application_name}",
-                            "value": "user_impersonation",
-                        }
-                    ]
-                },
-                "web": {
-                    "implicitGrantSettings": {
-                        "enableAccessTokenIssuance": False,
-                        "enableIdTokenIssuance": True,
-                    },
-                    "redirectUris": [
-                        f"{self.get_instance_url()}/.auth/login/aad/callback"
-                    ],
-                },
-                "requiredResourceAccess": [
-                    {
-                        "resourceAccess": [
-                            {"id": USER_READ_PERMISSION, "type": "Scope"}
-                        ],
-                        "resourceAppId": MICROSOFT_GRAPH_APP_ID,
-                    }
-                ],
-            }
-
-            app = query_microsoft_graph(
-                method="POST",
-                resource="applications",
-                body=params,
-                subscription=self.get_subscription_id(),
-            )
-
-            logger.info("creating service principal")
-
-            service_principal_params = {
-                "accountEnabled": True,
-                "appRoleAssignmentRequired": True,
-                "servicePrincipalType": "Application",
-                "appId": app["appId"],
-            }
-
-            def try_sp_create() -> None:
-                error: Optional[Exception] = None
-                for _ in range(10):
-                    try:
-                        query_microsoft_graph(
-                            method="POST",
-                            resource="servicePrincipals",
-                            body=service_principal_params,
-                            subscription=self.get_subscription_id(),
-                        )
-                        return
-                    except GraphQueryError as err:
-                        # work around timing issue when creating service principal
-                        # https://github.com/Azure/azure-cli/issues/14767
-                        if (
-                            "service principal being created must in the local tenant"
-                            not in str(err)
-                        ):
-                            raise err
-                    logger.warning(
-                        "creating service principal failed with an error that occurs "
-                        "due to AAD race conditions"
-                    )
-                    time.sleep(60)
-                if error is None:
-                    raise Exception("service principal creation failed")
-                else:
-                    raise error
-
-            try_sp_create()
-
+            app = self.create_new_app_registration(app_roles)
         else:
-            existing_role_values = [app_role["value"] for app_role in app["appRoles"]]
-            api_id = self.get_identifier_url()
+            self.update_existing_app_registration(app, app_roles)
 
-            if api_id not in app["identifierUris"]:
-                identifier_uris = app["identifierUris"]
-                identifier_uris.append(api_id)
-                query_microsoft_graph(
-                    method="PATCH",
-                    resource=f"applications/{app['id']}",
-                    body={"identifierUris": identifier_uris},
-                    subscription=self.get_subscription_id(),
-                )
-
-            has_missing_roles = any(
-                [role["value"] not in existing_role_values for role in app_roles]
-            )
-
-            if has_missing_roles:
-                # disabling the existing app role first to allow the update
-                # this is a requirement to update the application roles
-                for role in app["appRoles"]:
-                    role["isEnabled"] = False
-                query_microsoft_graph(
-                    method="PATCH",
-                    resource=f"applications/{app['id']}",
-                    body={"appRoles": app["appRoles"]},
-                    subscription=self.get_subscription_id(),
-                )
-
-                # overriding the list of app roles
-                query_microsoft_graph(
-                    method="PATCH",
-                    resource=f"applications/{app['id']}",
-                    body={"appRoles": app_roles},
-                    subscription=self.get_subscription_id(),
-                )
-
-        if self.multi_tenant_domain and app["signInAudience"] == "AzureADMyOrg":
+        if self.multi_tenant_domain != "" and app["signInAudience"] == "AzureADMyOrg":
             set_app_audience(
                 app["id"],
                 "AzureADMultipleOrgs",
@@ -478,47 +405,233 @@ class Client:
 
         (password_id, password) = self.create_password(app["id"])
 
-        cli_app = get_application(
-            app_id=uuid.UUID(ONEFUZZ_CLI_APP),
-            subscription_id=self.get_subscription_id(),
-        )
-
-        if not cli_app:
+        try:
+            cli_app = get_application(
+                app_id=uuid.UUID(self.cli_app_id),
+                subscription_id=self.get_subscription_id(),
+            )
+        except Exception as err:
+            cli_app = None
             logger.info(
                 "Could not find the default CLI application under the current "
-                "subscription, creating a new one"
+                "subscription."
             )
+            logger.debug(f"Error finding CLI application due to: {err}")
+        if self.auto_create_cli_app:
+            logger.info("auto_create_cli_app specified, creating a new CLI application")
             app_info = register_application(
                 "onefuzz-cli",
                 self.application_name,
                 OnefuzzAppRole.CliClient,
                 self.get_subscription_id(),
             )
-            if self.multi_tenant_domain:
-                authority = COMMON_AUTHORITY
-            else:
-                authority = app_info.authority
-            self.cli_config = {
-                "client_id": app_info.client_id,
-                "authority": authority,
-            }
 
-        else:
+            try:
+                cli_app = get_application(
+                    app_id=app_info.client_id,
+                    subscription_id=self.get_subscription_id(),
+                )
+                self.cli_app_id = str(app_info.client_id)
+                logger.info(f"New CLI app created - cli_app_id : {self.cli_app_id}")
+            except Exception as err:
+                logger.error(
+                    f"Unable to determine new 'cli_app_id' for new app registration: {err} "
+                )
+                sys.exit(1)
+
+        if cli_app:
             onefuzz_cli_app = cli_app
             authorize_application(uuid.UUID(onefuzz_cli_app["appId"]), app["appId"])
-            if self.multi_tenant_domain:
-                authority = COMMON_AUTHORITY
-            else:
 
-                tenant_id = get_tenant_id(self.get_subscription_id())
-                authority = "https://login.microsoftonline.com/%s" % tenant_id
             self.cli_config = {
                 "client_id": onefuzz_cli_app["appId"],
-                "authority": authority,
+                "authority": self.authority,
             }
 
-        self.results["client_id"] = app["appId"]
-        self.results["client_secret"] = password
+            # ensure replyURLs is set properly
+            if "publicClient" not in onefuzz_cli_app:
+                onefuzz_cli_app["publicClient"] = {}
+
+            if "redirectUris" not in onefuzz_cli_app["publicClient"]:
+                onefuzz_cli_app["publicClient"]["redirectUris"] = []
+
+            requiredRedirectUris = [
+                "http://localhost",  # required for browser-based auth
+                f"ms-appx-web://Microsoft.AAD.BrokerPlugin/{onefuzz_cli_app['appId']}",  # required for broker auth
+            ]
+
+            redirectUris: List[str] = onefuzz_cli_app["publicClient"]["redirectUris"]
+            updatedRedirectUris = list(set(requiredRedirectUris) | set(redirectUris))
+
+            if len(updatedRedirectUris) > len(redirectUris):
+                logger.info("Updating redirectUris for CLI app")
+                query_microsoft_graph(
+                    method="PATCH",
+                    resource=f"applications/{onefuzz_cli_app['id']}",
+                    body={"publicClient": {"redirectUris": updatedRedirectUris}},
+                    subscription=self.get_subscription_id(),
+                )
+
+            if not self.skip_aad_setup:
+                assign_instance_app_role(
+                    self.application_name,
+                    onefuzz_cli_app["displayName"],
+                    self.get_subscription_id(),
+                    OnefuzzAppRole.CliClient,
+                )
+
+            self.results["client_id"] = app["appId"]
+            self.results["client_secret"] = password
+        else:
+            logger.error(
+                "error deploying. could not find specified CLI app registrion."
+                "use flag --auto_create_cli_app to automatically create CLI registration"
+                "or specify a correct app id with --cli_app_id."
+            )
+            sys.exit(1)
+
+    def update_existing_app_registration(
+        self, app: Dict[str, Any], app_roles: List[Dict[str, Any]]
+    ) -> None:
+        logger.info("updating Application registration")
+        update_properties: Dict[str, Any] = {}
+
+        # find any identifier URIs that need updating
+        identifier_uris: List[str] = app["identifierUris"]
+        updated_identifier_uris = list(
+            set(identifier_uris) | set([self.get_identifier_url()])
+        )
+        if len(updated_identifier_uris) > len(identifier_uris):
+            update_properties["identifierUris"] = updated_identifier_uris
+
+        # find any roles that need updating
+        existing_role_values: List[str] = [
+            app_role["value"] for app_role in app["appRoles"]
+        ]
+        has_missing_roles = any(
+            [role["value"] not in existing_role_values for role in app_roles]
+        )
+
+        if has_missing_roles:
+            # disabling the existing app role first to allow the update
+            # this is a requirement to update the application roles
+            for role in app["appRoles"]:
+                role["isEnabled"] = False
+            query_microsoft_graph(
+                method="PATCH",
+                resource=f"applications/{app['id']}",
+                body={"appRoles": app["appRoles"]},
+                subscription=self.get_subscription_id(),
+            )
+
+            update_properties["appRoles"] = app_roles
+
+        if len(update_properties) > 0:
+            logger.info(
+                "- updating app registration properties: {}".format(
+                    ", ".join(update_properties.keys())
+                )
+            )
+            query_microsoft_graph(
+                method="PATCH",
+                resource=f"applications/{app['id']}",
+                body=update_properties,
+                subscription=self.get_subscription_id(),
+            )
+
+    def create_new_app_registration(
+        self, app_roles: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        logger.info("creating Application registration")
+
+        appRegRedirectUris = [f"{self.get_instance_url()}/.auth/login/aad/callback"]
+
+        if self.custom_domain:
+            appRegRedirectUris.append(
+                f"https://{self.custom_domain}/.auth/login/aad/callback"
+            )
+
+        params = {
+            "displayName": self.application_name,
+            "identifierUris": [self.get_identifier_url()],
+            "signInAudience": self.get_signin_audience(),
+            "appRoles": app_roles,
+            "api": {
+                "oauth2PermissionScopes": [
+                    {
+                        "adminConsentDescription": f"Allow the application to access {self.application_name} on behalf of the signed-in user.",
+                        "adminConsentDisplayName": f"Access {self.application_name}",
+                        "id": str(uuid.uuid4()),
+                        "isEnabled": True,
+                        "type": "User",
+                        "userConsentDescription": f"Allow the application to access {self.application_name} on your behalf.",
+                        "userConsentDisplayName": f"Access {self.application_name}",
+                        "value": "user_impersonation",
+                    }
+                ]
+            },
+            "web": {
+                "implicitGrantSettings": {
+                    "enableAccessTokenIssuance": False,
+                    "enableIdTokenIssuance": True,
+                },
+                "redirectUris": appRegRedirectUris,
+            },
+            "requiredResourceAccess": [
+                {
+                    "resourceAccess": [{"id": USER_READ_PERMISSION, "type": "Scope"}],
+                    "resourceAppId": MICROSOFT_GRAPH_APP_ID,
+                }
+            ],
+        }
+
+        app = query_microsoft_graph(
+            method="POST",
+            resource="applications",
+            body=params,
+            subscription=self.get_subscription_id(),
+        )
+
+        logger.info("creating service principal")
+
+        service_principal_params = {
+            "accountEnabled": True,
+            "appRoleAssignmentRequired": True,
+            "servicePrincipalType": "Application",
+            "appId": app["appId"],
+        }
+
+        def try_sp_create() -> None:
+            error: Optional[Exception] = None
+            for _ in range(10):
+                try:
+                    query_microsoft_graph(
+                        method="POST",
+                        resource="servicePrincipals",
+                        body=service_principal_params,
+                        subscription=self.get_subscription_id(),
+                    )
+                    return
+                except GraphQueryError as err:
+                    # work around timing issue when creating service principal
+                    # https://github.com/Azure/azure-cli/issues/14767
+                    if (
+                        "service principal being created must in the local tenant"
+                        not in str(err)
+                    ):
+                        raise err
+                logger.warning(
+                    "creating service principal failed with an error that occurs "
+                    "due to AAD race conditions"
+                )
+                time.sleep(60)
+            if error is None:
+                raise Exception("service principal creation failed")
+            else:
+                raise error
+
+        try_sp_create()
+        return app
 
     def deploy_template(self) -> None:
         logger.info("deploying arm template: %s", self.arm_template)
@@ -538,11 +651,24 @@ class Client:
             "%Y-%m-%dT%H:%M:%SZ"
         )
 
-        app_func_audiences = [
-            self.get_identifier_url(),
-            self.get_instance_url(),
-        ]
-        if self.multi_tenant_domain:
+        app_func_audiences = [self.get_identifier_url()]
+        app_func_audiences.extend([self.get_instance_url()])
+
+        # Add --custom_domain value to Allowed token audiences setting
+        if self.custom_domain:
+            if self.multi_tenant_domain != "":
+                root_domain = self.multi_tenant_domain
+            else:
+                root_domain = "%s.azurewebsites.net" % self.application_name
+
+            custom_domains = [
+                "api://%s/%s" % (root_domain, self.custom_domain.split(".")[0]),
+                "https://%s/%s" % (root_domain, self.custom_domain.split(".")[0]),
+            ]
+
+            app_func_audiences.extend(custom_domains)
+
+        if self.multi_tenant_domain != "":
             # clear the value in the Issuer Url field:
             # https://docs.microsoft.com/en-us/sharepoint/dev/spfx/use-aadhttpclient-enterpriseapi-multitenant
             app_func_issuer = ""
@@ -552,6 +678,15 @@ class Client:
             app_func_issuer = "https://sts.windows.net/%s/" % tenant_oid
             multi_tenant_domain = {"value": ""}
 
+        logger.info(
+            "template parameter enable_remote_debugging is set to: %s",
+            self.host_dotnet_on_windows,
+        )
+
+        logger.info(
+            "template parameter enable_profiler is set to: %s", self.enable_profiler
+        )
+
         params = {
             "app_func_audiences": {"value": app_func_audiences},
             "name": {"value": self.application_name},
@@ -560,14 +695,20 @@ class Client:
             "clientSecret": {"value": self.results["client_secret"]},
             "app_func_issuer": {"value": app_func_issuer},
             "signedExpiry": {"value": expiry},
+            "cli_app_id": {"value": self.cli_app_id},
+            "authority": {"value": self.authority},
+            "tenant_domain": {"value": self.tenant_domain},
             "multi_tenant_domain": multi_tenant_domain,
             "workbookData": {"value": self.workbook_data},
+            "enable_remote_debugging": {"value": self.host_dotnet_on_windows},
+            "enable_profiler": {"value": self.enable_profiler},
         }
         deployment = Deployment(
             properties=DeploymentProperties(
                 mode=DeploymentMode.incremental, template=template, parameters=params
             )
         )
+
         count = 0
         tries = 10
         error: Optional[Exception] = None
@@ -604,22 +745,22 @@ class Client:
             raise Exception("unknown error deploying")
 
     def assign_scaleset_identity_role(self) -> None:
-        if self.upgrade:
+        if self.skip_aad_setup:
             logger.info("Upgrading: skipping assignment of the managed identity role")
             return
         logger.info("assigning the user managed identity role")
         assign_instance_app_role(
             self.application_name,
-            self.results["deploy"]["scaleset-identity"]["value"],
+            self.results["deploy"]["scaleset_identity"]["value"],
             self.get_subscription_id(),
             OnefuzzAppRole.ManagedNode,
         )
 
     def assign_user_access(self) -> None:
-        if self.upgrade:
+        if self.skip_aad_setup:
             logger.info("Upgrading: Skipping assignment of current user to app role")
             return
-        logger.info("assinging user access to service principal")
+        logger.info("assigning user access to service principal")
         app = get_application(
             display_name=self.application_name,
             subscription_id=self.get_subscription_id(),
@@ -651,40 +792,56 @@ class Client:
 
     def apply_migrations(self) -> None:
         logger.info("applying database migrations")
-        name = self.results["deploy"]["func-name"]["value"]
-        key = self.results["deploy"]["func-key"]["value"]
+        name = self.func_name
+        key = self.func_key
         table_service = TableService(account_name=name, account_key=key)
         migrate(table_service, self.migrations)
 
+    def parse_config(self) -> None:
+        logger.info("parsing config: %s", self.config)
+
+        if self.config:
+            with open(self.config, "r") as template_handle:
+                config_template = json.load(template_handle)
+
+            try:
+                if self.auto_create_cli_app:
+                    config = Config(config_template, True)
+                else:
+                    config = Config(config_template)
+                self.rules = parse_rules(config)
+
+                ## Values provided via the CLI will override what's in the config.json
+                if self.authority == "":
+                    self.authority = (
+                        "https://login.microsoftonline.com/" + config.tenant_id
+                    )
+                if self.tenant_domain == "":
+                    self.tenant_domain = config.tenant_domain
+                if self.multi_tenant_domain == "":
+                    self.multi_tenant_domain = config.multi_tenant_domain
+                if not self.cli_app_id:
+                    if not self.auto_create_cli_app:
+                        self.cli_app_id = config.cli_client_id
+
+            except Exception as ex:
+                logging.info(
+                    "An Exception was encountered while parsing config file: %s", ex
+                )
+                raise Exception(
+                    "config and sub-values were not properly included in config."
+                )
+
     def set_instance_config(self) -> None:
         logger.info("setting instance config")
-        name = self.results["deploy"]["func-name"]["value"]
-        key = self.results["deploy"]["func-key"]["value"]
+        name = self.func_name
+        key = self.func_key
         tenant = UUID(self.results["deploy"]["tenant_id"]["value"])
         table_service = TableService(account_name=name, account_key=key)
 
         config_client = InstanceConfigClient(table_service, self.application_name)
 
-        if self.nsg_config:
-            logger.info("deploying arm template: %s", self.nsg_config)
-
-            with open(self.nsg_config, "r") as template_handle:
-                config_template = json.load(template_handle)
-
-            try:
-                config = NetworkSecurityConfig(config_template)
-                rules = parse_rules(config)
-            except Exception as ex:
-                logging.info(
-                    "An Exception was encountered while parsing nsg_config file: %s", ex
-                )
-                raise Exception(
-                    "proxy_nsg_config and sub-values were not properly included in config."
-                    + "Please submit a configuration resembling"
-                    + " { 'proxy_nsg_config': { 'allowed_ips': [], 'allowed_service_tags': [] } }"
-                )
-
-            update_nsg(config_client, rules)
+        update_nsg(config_client, self.rules)
 
         if self.admins:
             update_admins(config_client, self.admins)
@@ -694,50 +851,74 @@ class Client:
             tenants.append(tenant)
         update_allowed_aad_tenants(config_client, tenants)
 
-    def create_eventgrid(self) -> None:
-        logger.info("creating eventgrid subscription")
-        src_resource_id = self.results["deploy"]["fuzz-storage"]["value"]
-        dst_resource_id = self.results["deploy"]["func-storage"]["value"]
+    @staticmethod
+    def event_subscription_exists(
+        client: EventGridManagementClient, resource_id: str, subscription_name: str
+    ) -> bool:
+        try:
+            client.event_subscriptions.get(resource_id, subscription_name)
+            return True
+        except ResourceNotFoundError:
+            return False
 
+    def set_storage_account_key(self) -> None:
+        logger.info("setting storage keys")
         credential = AzureCliCredential()
         client = StorageManagementClient(
             credential, subscription_id=self.get_subscription_id()
         )
-        event_subscription_info = EventSubscription(
-            destination=StorageQueueEventSubscriptionDestination(
-                resource_id=dst_resource_id, queue_name="file-changes"
-            ),
-            filter=EventSubscriptionFilter(
-                included_event_types=[
-                    "Microsoft.Storage.BlobCreated",
-                    "Microsoft.Storage.BlobDeleted",
-                ]
-            ),
-            retry_policy=RetryPolicy(
-                max_delivery_attempts=30,
-                event_time_to_live_in_minutes=1440,
-            ),
-        )
+        try:
+            storage_accounts = client.storage_accounts.list_by_resource_group(
+                self.resource_group
+            )
+            for storage_account in storage_accounts:
+                keys = client.storage_accounts.list_keys(
+                    self.resource_group, storage_account.name
+                )
+                if storage_account.name.startswith("func"):
+                    self.func_id = storage_account.id
+                    self.func_name = storage_account.name
+                    self.func_key = keys.keys[0].value
+                if storage_account.name.startswith("fuzz"):
+                    self.fuzz_id = storage_account.id
+                    self.fuzz_name = storage_account.name
+                    self.fuzz_key = keys.keys[0].value
 
-        client = EventGridManagementClient(
+        except ResourceNotFoundError:
+            logger.error("failed to retrieve storage account keys")
+
+    def remove_eventgrid(self) -> None:
+        credential = AzureCliCredential()
+
+        src_resource_id = self.fuzz_id
+        if not src_resource_id:
+            return
+
+        event_grid_client = EventGridManagementClient(
             credential, subscription_id=self.get_subscription_id()
         )
-        result = client.event_subscriptions.begin_create_or_update(
-            src_resource_id, "onefuzz1", event_subscription_info
-        ).result()
-        if result.provisioning_state != "Succeeded":
-            raise Exception(
-                "eventgrid subscription failed: %s"
-                % json.dumps(result.as_dict(), indent=4, sort_keys=True),
+
+        # Event subscription for version up to 5.1.0
+        # or 7.1.0
+        old_subscription_names = ["onefuzz1", "onefuzz1_subscription"]
+        for old_subscription_name in old_subscription_names:
+            old_subscription_exists = Client.event_subscription_exists(
+                event_grid_client, src_resource_id, old_subscription_name
             )
+
+            if old_subscription_exists:
+                logger.info("removing deprecated event subscription")
+                event_grid_client.event_subscriptions.begin_delete(
+                    src_resource_id, old_subscription_name
+                ).wait()
 
     def add_instance_id(self) -> None:
         logger.info("setting instance_id log export")
 
         container_name = "base-config"
         blob_name = "instance_id"
-        account_name = self.results["deploy"]["func-name"]["value"]
-        key = self.results["deploy"]["func-key"]["value"]
+        account_name = self.func_name
+        key = self.func_key
         account_url = "https://%s.blob.core.windows.net" % account_name
         client = BlobServiceClient(account_url, credential=key)
         if container_name not in [x["name"] for x in client.list_containers()]:
@@ -762,8 +943,8 @@ class Client:
         container_name = "app-insights"
 
         logger.info("adding appinsight log export")
-        account_name = self.results["deploy"]["func-name"]["value"]
-        key = self.results["deploy"]["func-key"]["value"]
+        account_name = self.func_name
+        key = self.func_key
         account_url = "https://%s.blob.core.windows.net" % account_name
         client = BlobServiceClient(account_url, credential=key)
         if container_name not in [x["name"] for x in client.list_containers()]:
@@ -822,8 +1003,8 @@ class Client:
 
     def upload_tools(self) -> None:
         logger.info("uploading tools from %s", self.tools)
-        account_name = self.results["deploy"]["func-name"]["value"]
-        key = self.results["deploy"]["func-key"]["value"]
+        account_name = self.func_name
+        key = self.func_key
         account_url = "https://%s.blob.core.windows.net" % account_name
         client = BlobServiceClient(account_url, credential=key)
         if "tools" not in [x["name"] for x in client.list_containers()]:
@@ -859,8 +1040,8 @@ class Client:
 
     def upload_instance_setup(self) -> None:
         logger.info("uploading instance-specific-setup from %s", self.instance_specific)
-        account_name = self.results["deploy"]["func-name"]["value"]
-        key = self.results["deploy"]["func-key"]["value"]
+        account_name = self.func_name
+        key = self.func_key
         account_url = "https://%s.blob.core.windows.net" % account_name
         client = BlobServiceClient(account_url, credential=key)
         if "instance-specific-setup" not in [
@@ -905,8 +1086,8 @@ class Client:
 
     def upload_third_party(self) -> None:
         logger.info("uploading third-party tools from %s", self.third_party)
-        account_name = self.results["deploy"]["fuzz-name"]["value"]
-        key = self.results["deploy"]["fuzz-key"]["value"]
+        account_name = self.fuzz_name
+        key = self.fuzz_key
         account_url = "https://%s.blob.core.windows.net" % account_name
 
         client = BlobServiceClient(account_url, credential=key)
@@ -965,8 +1146,9 @@ class Client:
                                 "functionapp",
                                 "publish",
                                 self.application_name,
-                                "--python",
                                 "--no-build",
+                                "--dotnet-version",
+                                "7.0",
                             ],
                             env=dict(os.environ, CLI_DEBUG="1"),
                             cwd=tmpdirname,
@@ -997,17 +1179,10 @@ class Client:
             "config",
             "--endpoint",
             f"https://{self.application_name}.azurewebsites.net",
-            "--authority",
-            str(self.cli_config["authority"]),
-            "--client_id",
-            str(self.cli_config["client_id"]),
         ]
 
         if "client_secret" in self.cli_config:
             cmd += ["--client_secret", "YOUR_CLIENT_SECRET_HERE"]
-
-        if self.multi_tenant_domain:
-            cmd += ["--tenant_domain", str(self.multi_tenant_domain)]
 
         as_str = " ".join(cmd)
 
@@ -1026,19 +1201,28 @@ def arg_file(arg: str) -> str:
     return arg
 
 
+def lower_case(arg: str) -> str:
+    uppercase_check = any(i.isupper() for i in arg)
+    if uppercase_check:
+        raise Exception(UPPERCASE_NAME_ERROR)
+    return arg
+
+
 def main() -> None:
     rbac_only_states = [
+        ("parse_config", Client.parse_config),
         ("check_region", Client.check_region),
         ("rbac", Client.setup_rbac),
+        ("eventgrid", Client.remove_eventgrid),
         ("arm", Client.deploy_template),
         ("assign_scaleset_identity_role", Client.assign_scaleset_identity_role),
         ("assign_user_access", Client.assign_user_access),
     ]
 
     full_deployment_states = rbac_only_states + [
+        ("set_storage_keys", Client.set_storage_account_key),
         ("apply_migrations", Client.apply_migrations),
         ("set_instance_config", Client.set_instance_config),
-        ("eventgrid", Client.create_eventgrid),
         ("tools", Client.upload_tools),
         ("add_instance_id", Client.add_instance_id),
         ("instance-specific-setup", Client.upload_instance_setup),
@@ -1052,13 +1236,13 @@ def main() -> None:
     parser = argparse.ArgumentParser(formatter_class=formatter)
     parser.add_argument("location")
     parser.add_argument("resource_group")
-    parser.add_argument("application_name")
+    parser.add_argument("application_name", type=lower_case)
     parser.add_argument("owner")
-    parser.add_argument("nsg_config")
+    parser.add_argument("config")
     parser.add_argument(
-        "--arm-template",
+        "--bicep-template",
         type=arg_file,
-        default="azuredeploy.json",
+        default="azuredeploy.bicep",
         help="(default: %(default)s)",
     )
     parser.add_argument(
@@ -1107,9 +1291,9 @@ def main() -> None:
         "password for the pool agent",
     )
     parser.add_argument(
-        "--upgrade",
+        "--skip_aad_setup",
         action="store_true",
-        help="Indicates that the instance is being upgraded",
+        help="Assumes that AAD resources already exist, and they do not need to be upgraded.",
     )
     parser.add_argument(
         "--apply_migrations",
@@ -1122,12 +1306,6 @@ def main() -> None:
         "--export_appinsights",
         action="store_true",
         help="enable appinsight log export",
-    )
-    parser.add_argument(
-        "--multi_tenant_domain",
-        type=str,
-        default=None,
-        help="enable multi-tenant authentication with this tenant domain",
     )
     parser.add_argument(
         "--subscription_id",
@@ -1150,6 +1328,29 @@ def main() -> None:
         nargs="*",
         help="Set additional AAD tenants beyond the tenant the app is deployed in",
     )
+    parser.add_argument(
+        "--auto_create_cli_app",
+        action="store_true",
+        help="Create a new CLI App Registration if the default app or custom "
+        "app is not found. ",
+    )
+    parser.add_argument(
+        "--host_dotnet_on_windows",
+        action="store_true",
+        help="Use windows runtime for hosting dotnet Azure Function",
+    )
+
+    parser.add_argument(
+        "--enable_profiler",
+        action="store_true",
+        help="Enable CPU and memory profiler in dotnet Azure Function",
+    )
+
+    parser.add_argument(
+        "--custom_domain",
+        type=str,
+        help="Use a custom domain name for your Azure Function and CLI endpoint",
+    )
 
     args = parser.parse_args()
 
@@ -1162,23 +1363,26 @@ def main() -> None:
         location=args.location,
         application_name=args.application_name,
         owner=args.owner,
-        nsg_config=args.nsg_config,
+        config=args.config,
         client_id=args.client_id,
         client_secret=args.client_secret,
         app_zip=args.app_zip,
         tools=args.tools,
         instance_specific=args.instance_specific,
         third_party=args.third_party,
-        arm_template=args.arm_template,
+        bicep_template=args.bicep_template,
         workbook_data=args.workbook_data,
         create_registration=args.create_pool_registration,
         migrations=args.apply_migrations,
         export_appinsights=args.export_appinsights,
-        multi_tenant_domain=args.multi_tenant_domain,
-        upgrade=args.upgrade,
+        skip_aad_setup=args.skip_aad_setup,
         subscription_id=args.subscription_id,
         admins=args.set_admins,
         allowed_aad_tenants=args.allowed_aad_tenants or [],
+        auto_create_cli_app=args.auto_create_cli_app,
+        host_dotnet_on_windows=args.host_dotnet_on_windows,
+        enable_profiler=args.enable_profiler,
+        custom_domain=args.custom_domain,
     )
     if args.verbose:
         level = logging.DEBUG

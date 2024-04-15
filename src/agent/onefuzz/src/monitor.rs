@@ -1,106 +1,209 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use std::path::PathBuf;
-use std::sync::{self, mpsc::Receiver as SyncReceiver};
-use std::time::Duration;
+use std::path::{Path, PathBuf};
 
-use anyhow::Result;
-use notify::{DebouncedEvent, Watcher};
-use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
-use tokio::task::{self, JoinHandle};
+use anyhow::{format_err, Result};
+use notify::{
+    event::{CreateKind, ModifyKind, RenameMode},
+    Event, EventKind, Watcher,
+};
+use tokio::{
+    fs,
+    sync::mpsc::{unbounded_channel, UnboundedReceiver},
+};
 
+const DEFAULT_REPORT_DIRECTORIES: bool = false;
+
+/// Watches a directory, and on file creation, emits the path to the file.
 pub struct DirectoryMonitor {
     dir: PathBuf,
-    notify_events: UnboundedReceiver<DebouncedEvent>,
+    notify_events: UnboundedReceiver<notify::Result<Event>>,
     watcher: notify::RecommendedWatcher,
+    report_directories: bool,
 }
 
 impl DirectoryMonitor {
-    pub fn new(dir: impl Into<PathBuf>) -> Self {
-        let dir = dir.into();
-        let (notify_sender, notify_receiver) = sync::mpsc::channel();
-        let delay = Duration::from_millis(100);
-        let watcher = notify::watcher(notify_sender, delay).unwrap();
-
-        // We can drop the thread handle, and it will continue to run until it
-        // errors or we drop the async receiver.
-        let (notify_events, _handle) = into_async(notify_receiver);
-
-        Self {
-            dir,
-            notify_events,
-            watcher,
-        }
-    }
-
-    pub fn start(&mut self) -> Result<()> {
+    /// Create a new directory monitor.
+    ///
+    /// The path `dir` must name a directory, not a file.
+    pub async fn new(dir: impl AsRef<Path>) -> Result<Self> {
         use notify::RecursiveMode;
 
         // Canonicalize so we can compare the watched dir to paths in the events.
-        self.dir = std::fs::canonicalize(&self.dir)?;
-        self.watcher.watch(&self.dir, RecursiveMode::NonRecursive)?;
+        let dir = fs::canonicalize(dir).await?;
 
-        Ok(())
+        // Make sure we are watching a directory.
+        //
+        // This check will pass for symlinks to directories.
+        if !fs::metadata(&dir).await?.is_dir() {
+            bail!("monitored path is not a directory: {}", dir.display());
+        }
+
+        let (sender, notify_events) = unbounded_channel();
+        let mut watcher =
+            notify::recommended_watcher(move |event_or_err: notify::Result<Event>| {
+                // pre-filter the events here
+                let result = match event_or_err {
+                    Ok(ev) => match ev.kind {
+                        // we are interested in:
+                        // - create
+                        // - remove
+                        // - modify name
+                        EventKind::Create(_)
+                        | EventKind::Remove(_)
+                        | EventKind::Modify(ModifyKind::Name(_)) => Some(Ok(ev)),
+                        // we are not interested in:
+                        // - access
+                        // - modify something else (data, metadata)
+                        // - any other events
+                        EventKind::Access(_)
+                        | EventKind::Modify(_)
+                        | EventKind::Any
+                        | EventKind::Other => None,
+                    },
+                    Err(err) => Some(Err(err)),
+                };
+
+                if let Some(to_send) = result {
+                    // A send error only occurs when the channel is closed. No remedial
+                    // action is needed (or possible), so ignore it.
+                    let _ = sender.send(to_send);
+                }
+            })?;
+
+        watcher.watch(&dir, RecursiveMode::NonRecursive)?;
+
+        Ok(Self {
+            dir,
+            notify_events,
+            watcher,
+            report_directories: DEFAULT_REPORT_DIRECTORIES,
+        })
+    }
+
+    pub fn set_report_directories(&mut self, report_directories: bool) {
+        self.report_directories = report_directories;
     }
 
     pub fn stop(&mut self) -> Result<()> {
-        self.watcher.unwatch(self.dir.clone())?;
+        self.watcher.unwatch(&self.dir)?;
         Ok(())
     }
 
-    pub async fn next_file(&mut self) -> Option<PathBuf> {
+    pub async fn next_file(&mut self) -> Result<Option<PathBuf>> {
         loop {
-            let event = self.notify_events.recv().await;
+            let event = match self.notify_events.recv().await {
+                Some(Ok(event)) => event,
+                Some(Err(err)) => {
+                    // A low-level watch error has occurred. Treat as fatal.
+                    warn!(
+                        "error watching for new files. path = {}, error = {}",
+                        self.dir.display(),
+                        err
+                    );
 
-            if event.is_none() {
-                // Make sure we stop our `Watcher` if we return early.
-                let _ = self.stop();
-            }
-
-            match event? {
-                DebouncedEvent::Create(path) => {
-                    return Some(path);
+                    // Make sure we try to stop our `Watcher` if we return early.
+                    let _ = self.stop();
+                    return Ok(None);
                 }
-                DebouncedEvent::Remove(path) => {
+                None => {
+                    // Make sure we try to stop our `Watcher` if we return early.
+                    let _ = self.stop();
+                    return Ok(None);
+                }
+            };
+
+            let mut paths = event.paths.into_iter();
+
+            match event.kind {
+                EventKind::Create(create_kind) => {
+                    let path = paths
+                        .next()
+                        .ok_or_else(|| format_err!("missing path for file create event"))?;
+
+                    match create_kind {
+                        CreateKind::File => {
+                            return Ok(Some(path));
+                        }
+                        CreateKind::Folder => {
+                            if self.report_directories {
+                                return Ok(Some(path));
+                            }
+                        }
+                        CreateKind::Any | CreateKind::Other => {
+                            // Short-circuit and report this path if we're reporting everything.
+                            if self.report_directories {
+                                return Ok(Some(path));
+                            }
+
+                            match fs::metadata(&path).await {
+                                Ok(metadata) => {
+                                    // We're only reporting files, so make sure this is a file first.
+                                    if metadata.is_file() {
+                                        return Ok(Some(path));
+                                    }
+                                }
+                                Err(e) => {
+                                    warn!("failed to get metadata for {}: {:?}", path.display(), e);
+                                }
+                            }
+                        }
+                    }
+                }
+                EventKind::Modify(ModifyKind::Name(rename_mode)) => {
+                    match rename_mode {
+                        RenameMode::To => {
+                            let path = paths.next().ok_or_else(|| {
+                                format_err!("missing 'to' path for file rename-to event")
+                            })?;
+
+                            return Ok(Some(path));
+                        }
+                        RenameMode::Both => {
+                            let _from = paths.next().ok_or_else(|| {
+                                format_err!("missing 'from' path for file rename event")
+                            })?;
+
+                            let to = paths.next().ok_or_else(|| {
+                                format_err!("missing 'to' path for file rename event")
+                            })?;
+
+                            return Ok(Some(to));
+                        }
+                        RenameMode::From => {
+                            // ignore rename-from
+                        }
+                        RenameMode::Any | RenameMode::Other => {
+                            // something unusual, ignore
+                            info!(
+                                "unknown rename event: ignoring {:?} for path {:?}",
+                                rename_mode,
+                                paths.next()
+                            );
+                        }
+                    }
+                }
+                EventKind::Remove(..) => {
+                    let path = paths
+                        .next()
+                        .ok_or_else(|| format_err!("missing path for file remove event"))?;
+
                     if path == self.dir {
                         // The directory we were watching was removed; we're done.
                         let _ = self.stop();
-                        return None;
+                        return Ok(None);
                     } else {
                         // Some file _inside_ the watched directory was removed. Ignore.
                     }
                 }
-                _event => {
-                    // Other filesystem event. Ignore.
+                EventKind::Access(_) | EventKind::Modify(_) | EventKind::Other | EventKind::Any => {
+                    unreachable!() // these events have already been filtered out
                 }
             }
         }
     }
 }
 
-/// Convert a `Receiver` from a `std::sync::mpsc` channel into an async receiver.
-///
-/// The returned `JoinHandle` does _not_ need to be held by callers. The associated task
-/// will continue to run (detached) if dropped.
-fn into_async<T: Send + 'static>(
-    sync_receiver: SyncReceiver<T>,
-) -> (UnboundedReceiver<T>, JoinHandle<()>) {
-    let (sender, receiver) = unbounded_channel();
-
-    let handle = task::spawn_blocking(move || {
-        while let Ok(msg) = sync_receiver.recv() {
-            if sender.send(msg).is_err() {
-                // The async receiver is closed. We can't do anything else, so
-                // drop this message (and the sync receiver).
-                break;
-            }
-        }
-
-        // We'll never receive any more events.
-        //
-        // Drop our `Receiver` and hang up.
-    });
-
-    (receiver, handle)
-}
+#[cfg(test)]
+mod tests;

@@ -8,6 +8,8 @@ import logging
 import os
 import tempfile
 import time
+import uuid
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 from urllib.parse import urlparse
 from uuid import UUID
@@ -16,11 +18,22 @@ import jmespath
 from azure.applicationinsights import ApplicationInsightsDataClient
 from azure.applicationinsights.models import QueryBody
 from azure.identity import AzureCliCredential
+from azure.storage.blob import ContainerClient
+from onefuzztypes import models, primitives, requests, responses
 from onefuzztypes.enums import ContainerType, TaskType
-from onefuzztypes.models import BlobRef, Job, NodeAssignment, Report, Task, TaskConfig
+from onefuzztypes.models import (
+    BlobRef,
+    Job,
+    NodeAssignment,
+    RegressionReport,
+    Report,
+    Task,
+    TaskConfig,
+)
 from onefuzztypes.primitives import Container, Directory, PoolName
+from onefuzztypes.responses import TemplateValidationResponse
 
-from onefuzz.api import UUID_EXPANSION, Command, Onefuzz
+from onefuzz.api import UUID_EXPANSION, Command, Endpoint, Onefuzz
 
 from .azure_identity_credential_adapter import AzureIdentityCredentialAdapter
 from .backend import wait
@@ -98,7 +111,7 @@ class DebugScaleset(Command):
     """Debug tasks"""
 
     def _get_proxy_setup(
-        self, scaleset_id: UUID, machine_id: UUID, port: int, duration: Optional[int]
+        self, scaleset_id: str, machine_id: UUID, port: int, duration: Optional[int]
     ) -> Tuple[bool, str, Optional[Tuple[str, int]]]:
         proxy = self.onefuzz.scaleset_proxy.create(
             scaleset_id, machine_id, port, duration=duration
@@ -110,7 +123,7 @@ class DebugScaleset(Command):
 
     def rdp(
         self,
-        scaleset_id: UUID_EXPANSION,
+        scaleset_id: str,
         machine_id: UUID_EXPANSION,
         duration: Optional[int] = 1,
     ) -> None:
@@ -139,7 +152,7 @@ class DebugScaleset(Command):
 
     def ssh(
         self,
-        scaleset_id: UUID_EXPANSION,
+        scaleset_id: str,
         machine_id: UUID_EXPANSION,
         duration: Optional[int] = 1,
         command: Optional[str] = None,
@@ -172,7 +185,7 @@ class DebugScaleset(Command):
 
 
 class DebugTask(Command):
-    """Debug a specific job"""
+    """Debug a specific task"""
 
     def list_nodes(self, task_id: UUID_EXPANSION) -> Optional[List[NodeAssignment]]:
         task = self.onefuzz.tasks.get(task_id)
@@ -180,7 +193,7 @@ class DebugTask(Command):
 
     def _get_node(
         self, task_id: UUID_EXPANSION, node_id: Optional[UUID]
-    ) -> Tuple[UUID, UUID]:
+    ) -> Tuple[str, UUID]:
         nodes = self.list_nodes(task_id)
         if not nodes:
             raise Exception("task is not currently executing on nodes")
@@ -252,6 +265,11 @@ class DebugTask(Command):
         return self.onefuzz.debug.logs._query_libfuzzer_execs_sec(
             query, timespan, limit
         )
+
+    def download_files(self, task_id: UUID_EXPANSION, output: Directory) -> None:
+        """Download the containers by container type for the specified task"""
+
+        self.onefuzz.containers.download_task(task_id, output=output)
 
 
 class DebugJobTask(Command):
@@ -337,7 +355,7 @@ class DebugJob(Command):
     def download_files(self, job_id: UUID_EXPANSION, output: Directory) -> None:
         """Download the containers by container type for each task in the specified job"""
 
-        self.onefuzz.jobs.containers.download(job_id, output=output)
+        self.onefuzz.containers.download_job(job_id, output=output)
 
     def rerun(
         self,
@@ -455,7 +473,6 @@ class DebugLog(Command):
         if self._app_id is None:
             raise Exception("instance does not have an insights_appid")
         if self._client is None:
-
             creds = AzureIdentityCredentialAdapter(
                 AzureCliCredential(), resource_id="https://api.applicationinsights.io"
             )
@@ -613,6 +630,119 @@ class DebugLog(Command):
 
         return self.onefuzz.debug.logs._query_parts(query_parts, timespan=timespan)
 
+    def get(
+        self,
+        job_id: Optional[str],
+        task_id: Optional[str],
+        machine_id: Optional[str],
+        out_dir: Optional[primitives.Directory],
+        last: Optional[int] = None,
+        all: bool = False,
+    ) -> None:
+        """
+        Download all of the agent logs.
+        Make sure you have Storage Blob Data Reader permission.
+
+        :param str job_id: Which job you would like the logs for.
+        :param str task_id: Which task you would like the logs for.
+        :param str machine_id: Which machine you would like the logs for.
+        :param str out_dir: The directory where you would like to download the logs.
+        :param int last: (DEPRECATED) This option is a no-op. Now that machines have just one log file, getting the most recent logs implies downloading all of the log files.
+        :param bool all: (DEPRECATED) This option is a no-op. Now that machines have just one log file, getting the most recent logs implies downloading all of the log files.
+        """
+
+        # Appease mypy while these options are still part of the API
+        del last
+        del all
+
+        from typing import cast
+        from urllib import parse
+
+        if job_id is None:
+            if task_id is None:
+                raise Exception("You need to specify at least one of job_id or task_id")
+
+            task = self.onefuzz.tasks.get(task_id)
+            job_id = str(task.job_id)
+
+        job = self.onefuzz.jobs.get(job_id)
+        container_url = job.config.logs
+
+        if container_url is None:
+            raise Exception(
+                f"Job with id {job_id} does not have a logging location configured"
+            )
+
+        granularity = "job"
+        file_path = None
+        if task_id is not None:
+            granularity = "task"
+            file_path = f"{task_id}/"
+
+            if machine_id is not None:
+                granularity = "machine"
+                file_path += f"{machine_id}/"
+
+        container_name = parse.urlsplit(container_url).path[1:]
+        container = self.onefuzz.containers.get(container_name)
+
+        container_client: ContainerClient = ContainerClient.from_container_url(
+            container.sas_url
+        )
+
+        blobs = container_client.list_blobs(name_starts_with=file_path)
+
+        class CustomFile:
+            def __init__(self, name: str, creation_time: datetime):
+                self.name = name
+                self.creation_time = creation_time
+
+        files: List[CustomFile] = []
+
+        for f in blobs:
+            if f.creation_time is not None:
+                creation_time = cast(datetime, f.creation_time)
+            else:
+                creation_time = datetime.min
+
+            files.append(CustomFile(f.name, creation_time))
+
+        files.sort(key=lambda x: x.creation_time, reverse=True)
+
+        num_files = len(files)
+        if num_files > 0:
+            self.logger.info(f"Found {len(files)} matching files to download")
+        else:
+            self.logger.info("Did not find any matching files to download")
+            return None
+
+        if granularity == "job":
+            self.logger.info(
+                f"Downloading all of the log files for each task associated with the job with id {job_id}"
+            )
+        elif granularity == "task":
+            self.logger.info(
+                f"Downloading the log file for each machine associated with the task with id {task_id}"
+            )
+        else:
+            self.logger.info(
+                f"Downloading the log file for the machine with id {machine_id}"
+            )
+
+        for f in files:
+            self.logger.info(f"Downloading {f.name}")
+
+            local_path = os.path.join(out_dir or os.getcwd(), f.name)
+            local_directory = os.path.dirname(local_path)
+            if not os.path.exists(local_directory):
+                os.makedirs(local_directory)
+
+            with open(local_path, "wb") as download_file:
+                data = container_client.download_blob(f.name)
+                data.readinto(download_file)
+
+        return None
+
 
 class DebugNotification(Command):
     """Debug notification integrations"""
@@ -620,15 +750,23 @@ class DebugNotification(Command):
     def _get_container(
         self, task: Task, container_type: ContainerType
     ) -> Optional[Container]:
-        for container in task.config.containers:
-            if container.type == container_type:
-                return container.name
+        if task.config.containers is not None:
+            for container in task.config.containers:
+                if container.type == container_type:
+                    return container.name
         return None
 
     def _get_storage_account(self, container_name: Container) -> str:
         sas_url = self.onefuzz.containers.get(container_name).sas_url
         _, netloc, _, _, _, _ = urlparse(sas_url)
         return netloc.split(".")[0]
+
+    def template(
+        self, template: str, context: Optional[models.TemplateRenderContext]
+    ) -> TemplateValidationResponse:
+        """Validate scriban rendering of notification config"""
+        req = requests.TemplateValidationPost(template=template, context=context)
+        return self.onefuzz.validate_scriban.post(req)
 
     def job(
         self,
@@ -664,6 +802,7 @@ class DebugNotification(Command):
         """Inject a report into the specified crash reporting task"""
 
         task = self.onefuzz.tasks.get(task_id)
+
         crashes = self._get_container(task, ContainerType.crashes)
         reports = self._get_container(task, report_container_type)
 
@@ -681,23 +820,15 @@ class DebugNotification(Command):
                 handle.write("")
             self.onefuzz.containers.files.upload_file(crashes, file_path, crash_name)
 
-        report = Report(
-            input_blob=BlobRef(
-                account=self._get_storage_account(crashes),
-                container=crashes,
-                name=crash_name,
-            ),
-            executable=task.config.task.target_exe,
-            crash_type="fake crash report",
-            crash_site="fake crash site",
-            call_stack=["#0 fake", "#1 call", "#2 stack"],
-            call_stack_sha256=ZERO_SHA256,
-            input_sha256=EMPTY_SHA256,
-            asan_log="fake asan log",
-            task_id=task_id,
-            job_id=task.job_id,
-            minimized_stack=[],
-            minimized_stack_function_names=[],
+        input_blob_ref = BlobRef(
+            account=self._get_storage_account(crashes),
+            container=crashes,
+            name=crash_name,
+        )
+
+        target_exe = task.config.task.target_exe if task.config.task.target_exe else ""
+        report = self._create_report(
+            task.job_id, task.task_id, target_exe, input_blob_ref
         )
 
         with tempfile.TemporaryDirectory() as tempdir:
@@ -708,6 +839,84 @@ class DebugNotification(Command):
             self.onefuzz.containers.files.upload_file(
                 reports, file_path, crash_name + ".json"
             )
+
+    def test_template(
+        self,
+        notificationConfig: models.NotificationConfig,
+        task_id: Optional[UUID] = None,
+        report: Optional[str] = None,
+    ) -> responses.NotificationTestResponse:
+        """Test a notification template"""
+
+        the_report: Union[Report, RegressionReport, None] = None
+
+        if report is not None:
+            try:
+                the_report = RegressionReport.parse_raw(report)
+                print("testing regression report")
+            except Exception:
+                the_report = Report.parse_raw(report)
+                print("testing normal report")
+
+        if task_id is not None:
+            task = self.onefuzz.tasks.get(task_id)
+            if the_report is None:
+                input_blob_ref = BlobRef(
+                    account="dummy-storage-account",
+                    container="test-notification-crashes",
+                    name="fake-crash-sample",
+                )
+                the_report = self._create_report(
+                    task.job_id, task.task_id, "fake_target.exe", input_blob_ref
+                )
+            elif isinstance(the_report, RegressionReport):
+                if the_report.crash_test_result.crash_report is None:
+                    raise Exception("invalid regression report: no crash report")
+                the_report.crash_test_result.crash_report.task_id = task.task_id
+                the_report.crash_test_result.crash_report.job_id = task.job_id
+            else:
+                the_report.task_id = task.task_id
+                the_report.job_id = task.job_id
+        elif the_report is None:
+            raise Exception("must specify either task_id or report")
+
+        the_report.report_url = "https://dummy-container.blob.core.windows.net/dummy-reports/dummy-report.json"
+
+        endpoint = Endpoint(self.onefuzz)
+        return endpoint._req_model(
+            "POST",
+            responses.NotificationTestResponse,
+            data=requests.NotificationTest(
+                report=the_report,
+                notification=models.Notification(
+                    container=Container("test-notification-reports"),
+                    notification_id=uuid.uuid4(),
+                    config=notificationConfig.config,
+                ),
+            ),
+            alternate_endpoint="notifications/test",
+        )
+
+    def _create_report(
+        self, job_id: UUID, task_id: UUID, target_exe: str, input_blob_ref: BlobRef
+    ) -> Report:
+        return Report(
+            input_blob=input_blob_ref,
+            executable=target_exe,
+            crash_type="fake crash report",
+            crash_site="fake crash site",
+            call_stack=["#0 fake", "#1 call", "#2 stack"],
+            call_stack_sha256=ZERO_SHA256,
+            input_sha256=EMPTY_SHA256,
+            asan_log="fake asan log",
+            task_id=task_id,
+            job_id=job_id,
+            minimized_stack=[],
+            minimized_stack_function_names=[],
+            tool_name="libfuzzer",
+            tool_version="1.2.3",
+            onefuzz_version="1.2.3",
+        )
 
 
 class Debug(Command):

@@ -27,10 +27,10 @@ pub fn add_asan_log_env<S: BuildHasher>(env: &mut HashMap<String, String, S>, as
     let re = regex::Regex::new(r"^(?P<d>[a-zA-Z]):\\").expect("static regex parse failed");
     let network_path = re.replace(&asan_path_as_str, "\\\\127.0.0.1\\$d$\\");
     if let Some(v) = env.get_mut("ASAN_OPTIONS") {
-        let log_path = format!(":log_path={}", network_path);
+        let log_path = format!(":log_path={network_path}");
         v.push_str(&log_path);
     } else {
-        let log_path = format!("log_path={}", network_path);
+        let log_path = format!("log_path={network_path}");
         env.insert("ASAN_OPTIONS".to_string(), log_path);
     }
 }
@@ -40,10 +40,10 @@ pub fn add_asan_log_env<S: BuildHasher>(env: &mut HashMap<String, String, S>, as
     let asan_path = asan_dir.join("asan-log");
     let asan_path_as_str = asan_path.to_string_lossy();
     if let Some(v) = env.get_mut("ASAN_OPTIONS") {
-        let log_path = format!(":log_path={}", asan_path_as_str);
+        let log_path = format!(":log_path={asan_path_as_str}");
         v.push_str(&log_path);
     } else {
-        let log_path = format!("log_path={}", asan_path_as_str);
+        let log_path = format!("log_path={asan_path_as_str}");
         env.insert("ASAN_OPTIONS".to_string(), log_path);
     }
 }
@@ -56,7 +56,7 @@ pub async fn check_asan_string(mut data: String) -> Result<Option<CrashLog>> {
                 data.truncate(ASAN_LOG_TRUNCATE_SIZE);
                 data.push_str("...<truncated>");
             }
-            warn!(
+            debug!(
                 "unable to parse asan log from string.  error:{:?} data:{:?}",
                 err, data
             );

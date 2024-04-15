@@ -21,6 +21,27 @@ Each event will be submitted via HTTP POST to the user provided URL.
 }
 ```
 
+## Event Grid Payload format
+
+If webhook is set to have Event Grid message format then the payload will look as follows:
+
+### Example
+
+```json
+[
+    {
+        "data": {
+            "ping_id": "00000000-0000-0000-0000-000000000000"
+        },
+        "dataVersion": "1.0.0",
+        "eventTime": "0001-01-01T00:00:00",
+        "eventType": "ping",
+        "id": "00000000-0000-0000-0000-000000000000",
+        "subject": "example"
+    }
+]
+```
+
 ## Event Types (EventType)
 
 * [crash_reported](#crash_reported)
@@ -77,9 +98,12 @@ Each event will be submitted via HTTP POST to the user provided URL.
         },
         "input_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
         "job_id": "00000000-0000-0000-0000-000000000000",
+        "onefuzz_version": "1.2.3",
         "scariness_description": "example-scariness",
         "scariness_score": 10,
-        "task_id": "00000000-0000-0000-0000-000000000000"
+        "task_id": "00000000-0000-0000-0000-000000000000",
+        "tool_name": "libfuzzer",
+        "tool_version": "1.2.3"
     }
 }
 ```
@@ -119,6 +143,7 @@ Each event will be submitted via HTTP POST to the user provided URL.
                 "coverage",
                 "crashes",
                 "inputs",
+                "crashdumps",
                 "no_repro",
                 "readonly_inputs",
                 "reports",
@@ -126,7 +151,10 @@ Each event will be submitted via HTTP POST to the user provided URL.
                 "tools",
                 "unique_inputs",
                 "unique_reports",
-                "regression_reports"
+                "regression_reports",
+                "logs",
+                "extra_setup",
+                "extra_output"
             ],
             "title": "ContainerType"
         },
@@ -208,6 +236,14 @@ Each event will be submitted via HTTP POST to the user provided URL.
                     "title": "Minimized Stack Sha256",
                     "type": "string"
                 },
+                "onefuzz_version": {
+                    "title": "Onefuzz Version",
+                    "type": "string"
+                },
+                "report_url": {
+                    "title": "Report Url",
+                    "type": "string"
+                },
                 "scariness_description": {
                     "title": "Scariness Description",
                     "type": "string"
@@ -219,6 +255,14 @@ Each event will be submitted via HTTP POST to the user provided URL.
                 "task_id": {
                     "format": "uuid",
                     "title": "Task Id",
+                    "type": "string"
+                },
+                "tool_name": {
+                    "title": "Tool Name",
+                    "type": "string"
+                },
+                "tool_version": {
+                    "title": "Tool Version",
                     "type": "string"
                 }
             },
@@ -293,9 +337,7 @@ Each event will be submitted via HTTP POST to the user provided URL.
             },
             "required": [
                 "job_id",
-                "task",
-                "containers",
-                "tags"
+                "task"
             ],
             "title": "TaskConfig",
             "type": "object"
@@ -381,6 +423,10 @@ Each event will be submitted via HTTP POST to the user provided URL.
                     "title": "Expect Crash On Failure",
                     "type": "boolean"
                 },
+                "function_allowlist": {
+                    "title": "Function Allowlist",
+                    "type": "string"
+                },
                 "generator_env": {
                     "additionalProperties": {
                         "type": "string"
@@ -399,9 +445,18 @@ Each event will be submitted via HTTP POST to the user provided URL.
                     "title": "Generator Options",
                     "type": "array"
                 },
+                "min_available_memory_mb": {
+                    "minimum": 0,
+                    "title": "Min Available Memory Mb",
+                    "type": "integer"
+                },
                 "minimized_stack_depth": {
                     "title": "Minimized Stack Depth",
                     "type": "integer"
+                },
+                "module_allowlist": {
+                    "title": "Module Allowlist",
+                    "type": "string"
                 },
                 "preserve_existing_outputs": {
                     "title": "Preserve Existing Outputs",
@@ -421,6 +476,10 @@ Each event will be submitted via HTTP POST to the user provided URL.
                     },
                     "title": "Report List",
                     "type": "array"
+                },
+                "source_allowlist": {
+                    "title": "Source Allowlist",
+                    "type": "string"
                 },
                 "stats_file": {
                     "title": "Stats File",
@@ -451,6 +510,14 @@ Each event will be submitted via HTTP POST to the user provided URL.
                     "title": "Supervisor Options",
                     "type": "array"
                 },
+                "target_assembly": {
+                    "title": "Target Assembly",
+                    "type": "string"
+                },
+                "target_class": {
+                    "title": "Target Class",
+                    "type": "string"
+                },
                 "target_env": {
                     "additionalProperties": {
                         "type": "string"
@@ -460,6 +527,10 @@ Each event will be submitted via HTTP POST to the user provided URL.
                 },
                 "target_exe": {
                     "title": "Target Exe",
+                    "type": "string"
+                },
+                "target_method": {
+                    "title": "Target Method",
                     "type": "string"
                 },
                 "target_options": {
@@ -481,6 +552,13 @@ Each event will be submitted via HTTP POST to the user provided URL.
                 "target_workers": {
                     "title": "Target Workers",
                     "type": "integer"
+                },
+                "task_env": {
+                    "additionalProperties": {
+                        "type": "string"
+                    },
+                    "title": "Task Env",
+                    "type": "object"
                 },
                 "type": {
                     "$ref": "#/definitions/TaskType"
@@ -518,6 +596,9 @@ Each event will be submitted via HTTP POST to the user provided URL.
             "description": "An enumeration.",
             "enum": [
                 "coverage",
+                "dotnet_coverage",
+                "dotnet_crash_report",
+                "libfuzzer_dotnet_fuzz",
                 "libfuzzer_fuzz",
                 "libfuzzer_coverage",
                 "libfuzzer_crash_report",
@@ -641,10 +722,11 @@ Each event will be submitted via HTTP POST to the user provided URL.
         "admins": [
             "00000000-0000-0000-0000-000000000000"
         ],
-        "allow_pool_management": true,
         "allowed_aad_tenants": [
             "00000000-0000-0000-0000-000000000000"
         ],
+        "default_linux_vm_image": "Canonical:0001-com-ubuntu-server-jammy:22_04-lts:latest",
+        "default_windows_vm_image": "MicrosoftWindowsDesktop:Windows-11:win11-22h2-pro:latest",
         "network_config": {
             "address_space": "10.0.0.0/8",
             "subnet": "10.0.0.0/16"
@@ -653,7 +735,8 @@ Each event will be submitted via HTTP POST to the user provided URL.
             "allowed_ips": [],
             "allowed_service_tags": []
         },
-        "proxy_vm_sku": "Standard_B2s"
+        "proxy_vm_sku": "Standard_B2s",
+        "require_admin_privileges": false
     }
 }
 ```
@@ -769,11 +852,6 @@ Each event will be submitted via HTTP POST to the user provided URL.
                     "title": "Admins",
                     "type": "array"
                 },
-                "allow_pool_management": {
-                    "default": true,
-                    "title": "Allow Pool Management",
-                    "type": "boolean"
-                },
                 "allowed_aad_tenants": {
                     "items": {
                         "format": "uuid",
@@ -788,6 +866,16 @@ Each event will be submitted via HTTP POST to the user provided URL.
                     },
                     "title": "Api Access Rules",
                     "type": "object"
+                },
+                "default_linux_vm_image": {
+                    "default": "Canonical:0001-com-ubuntu-server-jammy:22_04-lts:latest",
+                    "title": "Default Linux Vm Image",
+                    "type": "string"
+                },
+                "default_windows_vm_image": {
+                    "default": "MicrosoftWindowsDesktop:Windows-11:win11-22h2-pro:latest",
+                    "title": "Default Windows Vm Image",
+                    "type": "string"
                 },
                 "extensions": {
                     "$ref": "#/definitions/AzureVmExtensionConfig"
@@ -813,6 +901,11 @@ Each event will be submitted via HTTP POST to the user provided URL.
                     "default": "Standard_B2s",
                     "title": "Proxy Vm Sku",
                     "type": "string"
+                },
+                "require_admin_privileges": {
+                    "default": false,
+                    "title": "Require Admin Privileges",
+                    "type": "boolean"
                 },
                 "vm_tags": {
                     "additionalProperties": {
@@ -946,6 +1039,10 @@ Each event will be submitted via HTTP POST to the user provided URL.
                     "title": "Duration",
                     "type": "integer"
                 },
+                "logs": {
+                    "title": "Logs",
+                    "type": "string"
+                },
                 "name": {
                     "title": "Name",
                     "type": "string"
@@ -1026,14 +1123,15 @@ Each event will be submitted via HTTP POST to the user provided URL.
                 "code": 468,
                 "errors": [
                     "example error message"
-                ]
+                ],
+                "title": "TASK_FAILED"
             },
             "task_id": "00000000-0000-0000-0000-000000000000",
             "task_type": "libfuzzer_fuzz"
         },
         {
             "task_id": "00000000-0000-0000-0000-000000000001",
-            "task_type": "libfuzzer_coverage"
+            "task_type": "coverage"
         }
     ]
 }
@@ -1047,7 +1145,8 @@ Each event will be submitted via HTTP POST to the user provided URL.
         "Error": {
             "properties": {
                 "code": {
-                    "$ref": "#/definitions/ErrorCode"
+                    "title": "Code",
+                    "type": "integer"
                 },
                 "errors": {
                     "items": {
@@ -1055,43 +1154,19 @@ Each event will be submitted via HTTP POST to the user provided URL.
                     },
                     "title": "Errors",
                     "type": "array"
+                },
+                "title": {
+                    "title": "Title",
+                    "type": "string"
                 }
             },
             "required": [
                 "code",
+                "title",
                 "errors"
             ],
             "title": "Error",
             "type": "object"
-        },
-        "ErrorCode": {
-            "description": "An enumeration.",
-            "enum": [
-                450,
-                451,
-                452,
-                453,
-                454,
-                455,
-                456,
-                457,
-                458,
-                459,
-                460,
-                461,
-                462,
-                463,
-                464,
-                465,
-                467,
-                468,
-                469,
-                470,
-                471,
-                472,
-                473
-            ],
-            "title": "ErrorCode"
         },
         "JobConfig": {
             "properties": {
@@ -1104,6 +1179,10 @@ Each event will be submitted via HTTP POST to the user provided URL.
                     "minimum": 1,
                     "title": "Duration",
                     "type": "integer"
+                },
+                "logs": {
+                    "title": "Logs",
+                    "type": "string"
                 },
                 "name": {
                     "title": "Name",
@@ -1148,6 +1227,9 @@ Each event will be submitted via HTTP POST to the user provided URL.
             "description": "An enumeration.",
             "enum": [
                 "coverage",
+                "dotnet_coverage",
+                "dotnet_crash_report",
+                "libfuzzer_dotnet_fuzz",
                 "libfuzzer_fuzz",
                 "libfuzzer_coverage",
                 "libfuzzer_crash_report",
@@ -1238,7 +1320,6 @@ Each event will be submitted via HTTP POST to the user provided URL.
             "type": "string"
         },
         "scaleset_id": {
-            "format": "uuid",
             "title": "Scaleset Id",
             "type": "string"
         }
@@ -1278,7 +1359,6 @@ Each event will be submitted via HTTP POST to the user provided URL.
             "type": "string"
         },
         "scaleset_id": {
-            "format": "uuid",
             "title": "Scaleset Id",
             "type": "string"
         }
@@ -1307,18 +1387,37 @@ Each event will be submitted via HTTP POST to the user provided URL.
 
 ```json
 {
+    "definitions": {
+        "NodeState": {
+            "description": "An enumeration.",
+            "enum": [
+                "init",
+                "free",
+                "setting_up",
+                "rebooting",
+                "ready",
+                "busy",
+                "done",
+                "shutdown",
+                "halt"
+            ],
+            "title": "NodeState"
+        }
+    },
     "properties": {
         "machine_id": {
             "format": "uuid",
             "title": "Machine Id",
             "type": "string"
         },
+        "machine_state": {
+            "$ref": "#/definitions/NodeState"
+        },
         "pool_name": {
             "title": "Pool Name",
             "type": "string"
         },
         "scaleset_id": {
-            "format": "uuid",
             "title": "Scaleset Id",
             "type": "string"
         }
@@ -1376,7 +1475,6 @@ Each event will be submitted via HTTP POST to the user provided URL.
             "type": "string"
         },
         "scaleset_id": {
-            "format": "uuid",
             "title": "Scaleset Id",
             "type": "string"
         },
@@ -1644,7 +1742,8 @@ Each event will be submitted via HTTP POST to the user provided URL.
         "code": 472,
         "errors": [
             "example error message"
-        ]
+        ],
+        "title": "PROXY_FAILED"
     },
     "proxy_id": "00000000-0000-0000-0000-000000000000",
     "region": "eastus"
@@ -1659,7 +1758,8 @@ Each event will be submitted via HTTP POST to the user provided URL.
         "Error": {
             "properties": {
                 "code": {
-                    "$ref": "#/definitions/ErrorCode"
+                    "title": "Code",
+                    "type": "integer"
                 },
                 "errors": {
                     "items": {
@@ -1667,43 +1767,19 @@ Each event will be submitted via HTTP POST to the user provided URL.
                     },
                     "title": "Errors",
                     "type": "array"
+                },
+                "title": {
+                    "title": "Title",
+                    "type": "string"
                 }
             },
             "required": [
                 "code",
+                "title",
                 "errors"
             ],
             "title": "Error",
             "type": "object"
-        },
-        "ErrorCode": {
-            "description": "An enumeration.",
-            "enum": [
-                450,
-                451,
-                452,
-                453,
-                454,
-                455,
-                456,
-                457,
-                458,
-                459,
-                460,
-                461,
-                462,
-                463,
-                464,
-                465,
-                467,
-                468,
-                469,
-                470,
-                471,
-                472,
-                473
-            ],
-            "title": "ErrorCode"
         }
     },
     "properties": {
@@ -1812,9 +1888,12 @@ Each event will be submitted via HTTP POST to the user provided URL.
                 },
                 "input_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
                 "job_id": "00000000-0000-0000-0000-000000000000",
+                "onefuzz_version": "1.2.3",
                 "scariness_description": "example-scariness",
                 "scariness_score": 10,
-                "task_id": "00000000-0000-0000-0000-000000000000"
+                "task_id": "00000000-0000-0000-0000-000000000000",
+                "tool_name": "libfuzzer",
+                "tool_version": "1.2.3"
             }
         },
         "original_crash_test_result": {
@@ -1836,9 +1915,12 @@ Each event will be submitted via HTTP POST to the user provided URL.
                 },
                 "input_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
                 "job_id": "00000000-0000-0000-0000-000000000000",
+                "onefuzz_version": "1.2.3",
                 "scariness_description": "example-scariness",
                 "scariness_score": 10,
-                "task_id": "00000000-0000-0000-0000-000000000000"
+                "task_id": "00000000-0000-0000-0000-000000000000",
+                "tool_name": "libfuzzer",
+                "tool_version": "1.2.3"
             }
         }
     }
@@ -1880,6 +1962,7 @@ Each event will be submitted via HTTP POST to the user provided URL.
                 "coverage",
                 "crashes",
                 "inputs",
+                "crashdumps",
                 "no_repro",
                 "readonly_inputs",
                 "reports",
@@ -1887,7 +1970,10 @@ Each event will be submitted via HTTP POST to the user provided URL.
                 "tools",
                 "unique_inputs",
                 "unique_reports",
-                "regression_reports"
+                "regression_reports",
+                "logs",
+                "extra_setup",
+                "extra_output"
             ],
             "title": "ContainerType"
         },
@@ -1952,6 +2038,10 @@ Each event will be submitted via HTTP POST to the user provided URL.
                 },
                 "original_crash_test_result": {
                     "$ref": "#/definitions/CrashTestResult"
+                },
+                "report_url": {
+                    "title": "Report Url",
+                    "type": "string"
                 }
             },
             "required": [
@@ -2038,6 +2128,14 @@ Each event will be submitted via HTTP POST to the user provided URL.
                     "title": "Minimized Stack Sha256",
                     "type": "string"
                 },
+                "onefuzz_version": {
+                    "title": "Onefuzz Version",
+                    "type": "string"
+                },
+                "report_url": {
+                    "title": "Report Url",
+                    "type": "string"
+                },
                 "scariness_description": {
                     "title": "Scariness Description",
                     "type": "string"
@@ -2049,6 +2147,14 @@ Each event will be submitted via HTTP POST to the user provided URL.
                 "task_id": {
                     "format": "uuid",
                     "title": "Task Id",
+                    "type": "string"
+                },
+                "tool_name": {
+                    "title": "Tool Name",
+                    "type": "string"
+                },
+                "tool_version": {
+                    "title": "Tool Version",
                     "type": "string"
                 }
             },
@@ -2123,9 +2229,7 @@ Each event will be submitted via HTTP POST to the user provided URL.
             },
             "required": [
                 "job_id",
-                "task",
-                "containers",
-                "tags"
+                "task"
             ],
             "title": "TaskConfig",
             "type": "object"
@@ -2211,6 +2315,10 @@ Each event will be submitted via HTTP POST to the user provided URL.
                     "title": "Expect Crash On Failure",
                     "type": "boolean"
                 },
+                "function_allowlist": {
+                    "title": "Function Allowlist",
+                    "type": "string"
+                },
                 "generator_env": {
                     "additionalProperties": {
                         "type": "string"
@@ -2229,9 +2337,18 @@ Each event will be submitted via HTTP POST to the user provided URL.
                     "title": "Generator Options",
                     "type": "array"
                 },
+                "min_available_memory_mb": {
+                    "minimum": 0,
+                    "title": "Min Available Memory Mb",
+                    "type": "integer"
+                },
                 "minimized_stack_depth": {
                     "title": "Minimized Stack Depth",
                     "type": "integer"
+                },
+                "module_allowlist": {
+                    "title": "Module Allowlist",
+                    "type": "string"
                 },
                 "preserve_existing_outputs": {
                     "title": "Preserve Existing Outputs",
@@ -2251,6 +2368,10 @@ Each event will be submitted via HTTP POST to the user provided URL.
                     },
                     "title": "Report List",
                     "type": "array"
+                },
+                "source_allowlist": {
+                    "title": "Source Allowlist",
+                    "type": "string"
                 },
                 "stats_file": {
                     "title": "Stats File",
@@ -2281,6 +2402,14 @@ Each event will be submitted via HTTP POST to the user provided URL.
                     "title": "Supervisor Options",
                     "type": "array"
                 },
+                "target_assembly": {
+                    "title": "Target Assembly",
+                    "type": "string"
+                },
+                "target_class": {
+                    "title": "Target Class",
+                    "type": "string"
+                },
                 "target_env": {
                     "additionalProperties": {
                         "type": "string"
@@ -2290,6 +2419,10 @@ Each event will be submitted via HTTP POST to the user provided URL.
                 },
                 "target_exe": {
                     "title": "Target Exe",
+                    "type": "string"
+                },
+                "target_method": {
+                    "title": "Target Method",
                     "type": "string"
                 },
                 "target_options": {
@@ -2311,6 +2444,13 @@ Each event will be submitted via HTTP POST to the user provided URL.
                 "target_workers": {
                     "title": "Target Workers",
                     "type": "integer"
+                },
+                "task_env": {
+                    "additionalProperties": {
+                        "type": "string"
+                    },
+                    "title": "Task Env",
+                    "type": "object"
                 },
                 "type": {
                     "$ref": "#/definitions/TaskType"
@@ -2348,6 +2488,9 @@ Each event will be submitted via HTTP POST to the user provided URL.
             "description": "An enumeration.",
             "enum": [
                 "coverage",
+                "dotnet_coverage",
+                "dotnet_crash_report",
+                "libfuzzer_dotnet_fuzz",
                 "libfuzzer_fuzz",
                 "libfuzzer_coverage",
                 "libfuzzer_crash_report",
@@ -2433,10 +2576,10 @@ Each event will be submitted via HTTP POST to the user provided URL.
 
 ```json
 {
-    "image": "Canonical:UbuntuServer:18.04-LTS:latest",
+    "image": "Canonical:0001-com-ubuntu-server-jammy:22_04-lts:latest",
     "pool_name": "example",
     "region": "eastus",
-    "scaleset_id": "00000000-0000-0000-0000-000000000000",
+    "scaleset_id": "example-000",
     "size": 10,
     "vm_sku": "Standard_D2s_v3"
 }
@@ -2460,7 +2603,6 @@ Each event will be submitted via HTTP POST to the user provided URL.
             "type": "string"
         },
         "scaleset_id": {
-            "format": "uuid",
             "title": "Scaleset Id",
             "type": "string"
         },
@@ -2493,7 +2635,7 @@ Each event will be submitted via HTTP POST to the user provided URL.
 ```json
 {
     "pool_name": "example",
-    "scaleset_id": "00000000-0000-0000-0000-000000000000"
+    "scaleset_id": "example-000"
 }
 ```
 
@@ -2507,7 +2649,6 @@ Each event will be submitted via HTTP POST to the user provided URL.
             "type": "string"
         },
         "scaleset_id": {
-            "format": "uuid",
             "title": "Scaleset Id",
             "type": "string"
         }
@@ -2531,10 +2672,11 @@ Each event will be submitted via HTTP POST to the user provided URL.
         "code": 456,
         "errors": [
             "example error message"
-        ]
+        ],
+        "title": "UNABLE_TO_RESIZE"
     },
     "pool_name": "example",
-    "scaleset_id": "00000000-0000-0000-0000-000000000000"
+    "scaleset_id": "example-000"
 }
 ```
 
@@ -2546,7 +2688,8 @@ Each event will be submitted via HTTP POST to the user provided URL.
         "Error": {
             "properties": {
                 "code": {
-                    "$ref": "#/definitions/ErrorCode"
+                    "title": "Code",
+                    "type": "integer"
                 },
                 "errors": {
                     "items": {
@@ -2554,43 +2697,19 @@ Each event will be submitted via HTTP POST to the user provided URL.
                     },
                     "title": "Errors",
                     "type": "array"
+                },
+                "title": {
+                    "title": "Title",
+                    "type": "string"
                 }
             },
             "required": [
                 "code",
+                "title",
                 "errors"
             ],
             "title": "Error",
             "type": "object"
-        },
-        "ErrorCode": {
-            "description": "An enumeration.",
-            "enum": [
-                450,
-                451,
-                452,
-                453,
-                454,
-                455,
-                456,
-                457,
-                458,
-                459,
-                460,
-                461,
-                462,
-                463,
-                464,
-                465,
-                467,
-                468,
-                469,
-                470,
-                471,
-                472,
-                473
-            ],
-            "title": "ErrorCode"
         }
     },
     "properties": {
@@ -2602,7 +2721,6 @@ Each event will be submitted via HTTP POST to the user provided URL.
             "type": "string"
         },
         "scaleset_id": {
-            "format": "uuid",
             "title": "Scaleset Id",
             "type": "string"
         }
@@ -2624,7 +2742,7 @@ Each event will be submitted via HTTP POST to the user provided URL.
 ```json
 {
     "pool_name": "example",
-    "scaleset_id": "00000000-0000-0000-0000-000000000000",
+    "scaleset_id": "example-000",
     "size": 0
 }
 ```
@@ -2639,7 +2757,6 @@ Each event will be submitted via HTTP POST to the user provided URL.
             "type": "string"
         },
         "scaleset_id": {
-            "format": "uuid",
             "title": "Scaleset Id",
             "type": "string"
         },
@@ -2665,7 +2782,7 @@ Each event will be submitted via HTTP POST to the user provided URL.
 ```json
 {
     "pool_name": "example",
-    "scaleset_id": "00000000-0000-0000-0000-000000000000",
+    "scaleset_id": "example-000",
     "state": "init"
 }
 ```
@@ -2695,7 +2812,6 @@ Each event will be submitted via HTTP POST to the user provided URL.
             "type": "string"
         },
         "scaleset_id": {
-            "format": "uuid",
             "title": "Scaleset Id",
             "type": "string"
         },
@@ -2767,6 +2883,7 @@ Each event will be submitted via HTTP POST to the user provided URL.
                 "coverage",
                 "crashes",
                 "inputs",
+                "crashdumps",
                 "no_repro",
                 "readonly_inputs",
                 "reports",
@@ -2774,7 +2891,10 @@ Each event will be submitted via HTTP POST to the user provided URL.
                 "tools",
                 "unique_inputs",
                 "unique_reports",
-                "regression_reports"
+                "regression_reports",
+                "logs",
+                "extra_setup",
+                "extra_output"
             ],
             "title": "ContainerType"
         },
@@ -2836,9 +2956,7 @@ Each event will be submitted via HTTP POST to the user provided URL.
             },
             "required": [
                 "job_id",
-                "task",
-                "containers",
-                "tags"
+                "task"
             ],
             "title": "TaskConfig",
             "type": "object"
@@ -2924,6 +3042,10 @@ Each event will be submitted via HTTP POST to the user provided URL.
                     "title": "Expect Crash On Failure",
                     "type": "boolean"
                 },
+                "function_allowlist": {
+                    "title": "Function Allowlist",
+                    "type": "string"
+                },
                 "generator_env": {
                     "additionalProperties": {
                         "type": "string"
@@ -2942,9 +3064,18 @@ Each event will be submitted via HTTP POST to the user provided URL.
                     "title": "Generator Options",
                     "type": "array"
                 },
+                "min_available_memory_mb": {
+                    "minimum": 0,
+                    "title": "Min Available Memory Mb",
+                    "type": "integer"
+                },
                 "minimized_stack_depth": {
                     "title": "Minimized Stack Depth",
                     "type": "integer"
+                },
+                "module_allowlist": {
+                    "title": "Module Allowlist",
+                    "type": "string"
                 },
                 "preserve_existing_outputs": {
                     "title": "Preserve Existing Outputs",
@@ -2964,6 +3095,10 @@ Each event will be submitted via HTTP POST to the user provided URL.
                     },
                     "title": "Report List",
                     "type": "array"
+                },
+                "source_allowlist": {
+                    "title": "Source Allowlist",
+                    "type": "string"
                 },
                 "stats_file": {
                     "title": "Stats File",
@@ -2994,6 +3129,14 @@ Each event will be submitted via HTTP POST to the user provided URL.
                     "title": "Supervisor Options",
                     "type": "array"
                 },
+                "target_assembly": {
+                    "title": "Target Assembly",
+                    "type": "string"
+                },
+                "target_class": {
+                    "title": "Target Class",
+                    "type": "string"
+                },
                 "target_env": {
                     "additionalProperties": {
                         "type": "string"
@@ -3003,6 +3146,10 @@ Each event will be submitted via HTTP POST to the user provided URL.
                 },
                 "target_exe": {
                     "title": "Target Exe",
+                    "type": "string"
+                },
+                "target_method": {
+                    "title": "Target Method",
                     "type": "string"
                 },
                 "target_options": {
@@ -3024,6 +3171,13 @@ Each event will be submitted via HTTP POST to the user provided URL.
                 "target_workers": {
                     "title": "Target Workers",
                     "type": "integer"
+                },
+                "task_env": {
+                    "additionalProperties": {
+                        "type": "string"
+                    },
+                    "title": "Task Env",
+                    "type": "object"
                 },
                 "type": {
                     "$ref": "#/definitions/TaskType"
@@ -3061,6 +3215,9 @@ Each event will be submitted via HTTP POST to the user provided URL.
             "description": "An enumeration.",
             "enum": [
                 "coverage",
+                "dotnet_coverage",
+                "dotnet_crash_report",
+                "libfuzzer_dotnet_fuzz",
                 "libfuzzer_fuzz",
                 "libfuzzer_coverage",
                 "libfuzzer_crash_report",
@@ -3198,7 +3355,8 @@ Each event will be submitted via HTTP POST to the user provided URL.
         "code": 468,
         "errors": [
             "example error message"
-        ]
+        ],
+        "title": "TASK_FAILED"
     },
     "job_id": "00000000-0000-0000-0000-000000000000",
     "task_id": "00000000-0000-0000-0000-000000000000",
@@ -3222,6 +3380,7 @@ Each event will be submitted via HTTP POST to the user provided URL.
                 "coverage",
                 "crashes",
                 "inputs",
+                "crashdumps",
                 "no_repro",
                 "readonly_inputs",
                 "reports",
@@ -3229,14 +3388,18 @@ Each event will be submitted via HTTP POST to the user provided URL.
                 "tools",
                 "unique_inputs",
                 "unique_reports",
-                "regression_reports"
+                "regression_reports",
+                "logs",
+                "extra_setup",
+                "extra_output"
             ],
             "title": "ContainerType"
         },
         "Error": {
             "properties": {
                 "code": {
-                    "$ref": "#/definitions/ErrorCode"
+                    "title": "Code",
+                    "type": "integer"
                 },
                 "errors": {
                     "items": {
@@ -3244,43 +3407,19 @@ Each event will be submitted via HTTP POST to the user provided URL.
                     },
                     "title": "Errors",
                     "type": "array"
+                },
+                "title": {
+                    "title": "Title",
+                    "type": "string"
                 }
             },
             "required": [
                 "code",
+                "title",
                 "errors"
             ],
             "title": "Error",
             "type": "object"
-        },
-        "ErrorCode": {
-            "description": "An enumeration.",
-            "enum": [
-                450,
-                451,
-                452,
-                453,
-                454,
-                455,
-                456,
-                457,
-                458,
-                459,
-                460,
-                461,
-                462,
-                463,
-                464,
-                465,
-                467,
-                468,
-                469,
-                470,
-                471,
-                472,
-                473
-            ],
-            "title": "ErrorCode"
         },
         "StatsFormat": {
             "description": "An enumeration.",
@@ -3340,9 +3479,7 @@ Each event will be submitted via HTTP POST to the user provided URL.
             },
             "required": [
                 "job_id",
-                "task",
-                "containers",
-                "tags"
+                "task"
             ],
             "title": "TaskConfig",
             "type": "object"
@@ -3428,6 +3565,10 @@ Each event will be submitted via HTTP POST to the user provided URL.
                     "title": "Expect Crash On Failure",
                     "type": "boolean"
                 },
+                "function_allowlist": {
+                    "title": "Function Allowlist",
+                    "type": "string"
+                },
                 "generator_env": {
                     "additionalProperties": {
                         "type": "string"
@@ -3446,9 +3587,18 @@ Each event will be submitted via HTTP POST to the user provided URL.
                     "title": "Generator Options",
                     "type": "array"
                 },
+                "min_available_memory_mb": {
+                    "minimum": 0,
+                    "title": "Min Available Memory Mb",
+                    "type": "integer"
+                },
                 "minimized_stack_depth": {
                     "title": "Minimized Stack Depth",
                     "type": "integer"
+                },
+                "module_allowlist": {
+                    "title": "Module Allowlist",
+                    "type": "string"
                 },
                 "preserve_existing_outputs": {
                     "title": "Preserve Existing Outputs",
@@ -3468,6 +3618,10 @@ Each event will be submitted via HTTP POST to the user provided URL.
                     },
                     "title": "Report List",
                     "type": "array"
+                },
+                "source_allowlist": {
+                    "title": "Source Allowlist",
+                    "type": "string"
                 },
                 "stats_file": {
                     "title": "Stats File",
@@ -3498,6 +3652,14 @@ Each event will be submitted via HTTP POST to the user provided URL.
                     "title": "Supervisor Options",
                     "type": "array"
                 },
+                "target_assembly": {
+                    "title": "Target Assembly",
+                    "type": "string"
+                },
+                "target_class": {
+                    "title": "Target Class",
+                    "type": "string"
+                },
                 "target_env": {
                     "additionalProperties": {
                         "type": "string"
@@ -3507,6 +3669,10 @@ Each event will be submitted via HTTP POST to the user provided URL.
                 },
                 "target_exe": {
                     "title": "Target Exe",
+                    "type": "string"
+                },
+                "target_method": {
+                    "title": "Target Method",
                     "type": "string"
                 },
                 "target_options": {
@@ -3528,6 +3694,13 @@ Each event will be submitted via HTTP POST to the user provided URL.
                 "target_workers": {
                     "title": "Target Workers",
                     "type": "integer"
+                },
+                "task_env": {
+                    "additionalProperties": {
+                        "type": "string"
+                    },
+                    "title": "Task Env",
+                    "type": "object"
                 },
                 "type": {
                     "$ref": "#/definitions/TaskType"
@@ -3565,6 +3738,9 @@ Each event will be submitted via HTTP POST to the user provided URL.
             "description": "An enumeration.",
             "enum": [
                 "coverage",
+                "dotnet_coverage",
+                "dotnet_crash_report",
+                "libfuzzer_dotnet_fuzz",
                 "libfuzzer_fuzz",
                 "libfuzzer_coverage",
                 "libfuzzer_crash_report",
@@ -3719,6 +3895,7 @@ Each event will be submitted via HTTP POST to the user provided URL.
                 "coverage",
                 "crashes",
                 "inputs",
+                "crashdumps",
                 "no_repro",
                 "readonly_inputs",
                 "reports",
@@ -3726,7 +3903,10 @@ Each event will be submitted via HTTP POST to the user provided URL.
                 "tools",
                 "unique_inputs",
                 "unique_reports",
-                "regression_reports"
+                "regression_reports",
+                "logs",
+                "extra_setup",
+                "extra_output"
             ],
             "title": "ContainerType"
         },
@@ -3788,9 +3968,7 @@ Each event will be submitted via HTTP POST to the user provided URL.
             },
             "required": [
                 "job_id",
-                "task",
-                "containers",
-                "tags"
+                "task"
             ],
             "title": "TaskConfig",
             "type": "object"
@@ -3876,6 +4054,10 @@ Each event will be submitted via HTTP POST to the user provided URL.
                     "title": "Expect Crash On Failure",
                     "type": "boolean"
                 },
+                "function_allowlist": {
+                    "title": "Function Allowlist",
+                    "type": "string"
+                },
                 "generator_env": {
                     "additionalProperties": {
                         "type": "string"
@@ -3894,9 +4076,18 @@ Each event will be submitted via HTTP POST to the user provided URL.
                     "title": "Generator Options",
                     "type": "array"
                 },
+                "min_available_memory_mb": {
+                    "minimum": 0,
+                    "title": "Min Available Memory Mb",
+                    "type": "integer"
+                },
                 "minimized_stack_depth": {
                     "title": "Minimized Stack Depth",
                     "type": "integer"
+                },
+                "module_allowlist": {
+                    "title": "Module Allowlist",
+                    "type": "string"
                 },
                 "preserve_existing_outputs": {
                     "title": "Preserve Existing Outputs",
@@ -3916,6 +4107,10 @@ Each event will be submitted via HTTP POST to the user provided URL.
                     },
                     "title": "Report List",
                     "type": "array"
+                },
+                "source_allowlist": {
+                    "title": "Source Allowlist",
+                    "type": "string"
                 },
                 "stats_file": {
                     "title": "Stats File",
@@ -3946,6 +4141,14 @@ Each event will be submitted via HTTP POST to the user provided URL.
                     "title": "Supervisor Options",
                     "type": "array"
                 },
+                "target_assembly": {
+                    "title": "Target Assembly",
+                    "type": "string"
+                },
+                "target_class": {
+                    "title": "Target Class",
+                    "type": "string"
+                },
                 "target_env": {
                     "additionalProperties": {
                         "type": "string"
@@ -3955,6 +4158,10 @@ Each event will be submitted via HTTP POST to the user provided URL.
                 },
                 "target_exe": {
                     "title": "Target Exe",
+                    "type": "string"
+                },
+                "target_method": {
+                    "title": "Target Method",
                     "type": "string"
                 },
                 "target_options": {
@@ -3976,6 +4183,13 @@ Each event will be submitted via HTTP POST to the user provided URL.
                 "target_workers": {
                     "title": "Target Workers",
                     "type": "integer"
+                },
+                "task_env": {
+                    "additionalProperties": {
+                        "type": "string"
+                    },
+                    "title": "Task Env",
+                    "type": "object"
                 },
                 "type": {
                     "$ref": "#/definitions/TaskType"
@@ -4013,6 +4227,9 @@ Each event will be submitted via HTTP POST to the user provided URL.
             "description": "An enumeration.",
             "enum": [
                 "coverage",
+                "dotnet_coverage",
+                "dotnet_crash_report",
+                "libfuzzer_dotnet_fuzz",
                 "libfuzzer_fuzz",
                 "libfuzzer_coverage",
                 "libfuzzer_crash_report",
@@ -4141,6 +4358,7 @@ Each event will be submitted via HTTP POST to the user provided URL.
                 "coverage",
                 "crashes",
                 "inputs",
+                "crashdumps",
                 "no_repro",
                 "readonly_inputs",
                 "reports",
@@ -4148,7 +4366,10 @@ Each event will be submitted via HTTP POST to the user provided URL.
                 "tools",
                 "unique_inputs",
                 "unique_reports",
-                "regression_reports"
+                "regression_reports",
+                "logs",
+                "extra_setup",
+                "extra_output"
             ],
             "title": "ContainerType"
         },
@@ -4210,9 +4431,7 @@ Each event will be submitted via HTTP POST to the user provided URL.
             },
             "required": [
                 "job_id",
-                "task",
-                "containers",
-                "tags"
+                "task"
             ],
             "title": "TaskConfig",
             "type": "object"
@@ -4298,6 +4517,10 @@ Each event will be submitted via HTTP POST to the user provided URL.
                     "title": "Expect Crash On Failure",
                     "type": "boolean"
                 },
+                "function_allowlist": {
+                    "title": "Function Allowlist",
+                    "type": "string"
+                },
                 "generator_env": {
                     "additionalProperties": {
                         "type": "string"
@@ -4316,9 +4539,18 @@ Each event will be submitted via HTTP POST to the user provided URL.
                     "title": "Generator Options",
                     "type": "array"
                 },
+                "min_available_memory_mb": {
+                    "minimum": 0,
+                    "title": "Min Available Memory Mb",
+                    "type": "integer"
+                },
                 "minimized_stack_depth": {
                     "title": "Minimized Stack Depth",
                     "type": "integer"
+                },
+                "module_allowlist": {
+                    "title": "Module Allowlist",
+                    "type": "string"
                 },
                 "preserve_existing_outputs": {
                     "title": "Preserve Existing Outputs",
@@ -4338,6 +4570,10 @@ Each event will be submitted via HTTP POST to the user provided URL.
                     },
                     "title": "Report List",
                     "type": "array"
+                },
+                "source_allowlist": {
+                    "title": "Source Allowlist",
+                    "type": "string"
                 },
                 "stats_file": {
                     "title": "Stats File",
@@ -4368,6 +4604,14 @@ Each event will be submitted via HTTP POST to the user provided URL.
                     "title": "Supervisor Options",
                     "type": "array"
                 },
+                "target_assembly": {
+                    "title": "Target Assembly",
+                    "type": "string"
+                },
+                "target_class": {
+                    "title": "Target Class",
+                    "type": "string"
+                },
                 "target_env": {
                     "additionalProperties": {
                         "type": "string"
@@ -4377,6 +4621,10 @@ Each event will be submitted via HTTP POST to the user provided URL.
                 },
                 "target_exe": {
                     "title": "Target Exe",
+                    "type": "string"
+                },
+                "target_method": {
+                    "title": "Target Method",
                     "type": "string"
                 },
                 "target_options": {
@@ -4398,6 +4646,13 @@ Each event will be submitted via HTTP POST to the user provided URL.
                 "target_workers": {
                     "title": "Target Workers",
                     "type": "integer"
+                },
+                "task_env": {
+                    "additionalProperties": {
+                        "type": "string"
+                    },
+                    "title": "Task Env",
+                    "type": "object"
                 },
                 "type": {
                     "$ref": "#/definitions/TaskType"
@@ -4449,6 +4704,9 @@ Each event will be submitted via HTTP POST to the user provided URL.
             "description": "An enumeration.",
             "enum": [
                 "coverage",
+                "dotnet_coverage",
+                "dotnet_crash_report",
+                "libfuzzer_dotnet_fuzz",
                 "libfuzzer_fuzz",
                 "libfuzzer_coverage",
                 "libfuzzer_crash_report",
@@ -4590,6 +4848,7 @@ Each event will be submitted via HTTP POST to the user provided URL.
                 "coverage",
                 "crashes",
                 "inputs",
+                "crashdumps",
                 "no_repro",
                 "readonly_inputs",
                 "reports",
@@ -4597,7 +4856,10 @@ Each event will be submitted via HTTP POST to the user provided URL.
                 "tools",
                 "unique_inputs",
                 "unique_reports",
-                "regression_reports"
+                "regression_reports",
+                "logs",
+                "extra_setup",
+                "extra_output"
             ],
             "title": "ContainerType"
         },
@@ -4659,9 +4921,7 @@ Each event will be submitted via HTTP POST to the user provided URL.
             },
             "required": [
                 "job_id",
-                "task",
-                "containers",
-                "tags"
+                "task"
             ],
             "title": "TaskConfig",
             "type": "object"
@@ -4747,6 +5007,10 @@ Each event will be submitted via HTTP POST to the user provided URL.
                     "title": "Expect Crash On Failure",
                     "type": "boolean"
                 },
+                "function_allowlist": {
+                    "title": "Function Allowlist",
+                    "type": "string"
+                },
                 "generator_env": {
                     "additionalProperties": {
                         "type": "string"
@@ -4765,9 +5029,18 @@ Each event will be submitted via HTTP POST to the user provided URL.
                     "title": "Generator Options",
                     "type": "array"
                 },
+                "min_available_memory_mb": {
+                    "minimum": 0,
+                    "title": "Min Available Memory Mb",
+                    "type": "integer"
+                },
                 "minimized_stack_depth": {
                     "title": "Minimized Stack Depth",
                     "type": "integer"
+                },
+                "module_allowlist": {
+                    "title": "Module Allowlist",
+                    "type": "string"
                 },
                 "preserve_existing_outputs": {
                     "title": "Preserve Existing Outputs",
@@ -4787,6 +5060,10 @@ Each event will be submitted via HTTP POST to the user provided URL.
                     },
                     "title": "Report List",
                     "type": "array"
+                },
+                "source_allowlist": {
+                    "title": "Source Allowlist",
+                    "type": "string"
                 },
                 "stats_file": {
                     "title": "Stats File",
@@ -4817,6 +5094,14 @@ Each event will be submitted via HTTP POST to the user provided URL.
                     "title": "Supervisor Options",
                     "type": "array"
                 },
+                "target_assembly": {
+                    "title": "Target Assembly",
+                    "type": "string"
+                },
+                "target_class": {
+                    "title": "Target Class",
+                    "type": "string"
+                },
                 "target_env": {
                     "additionalProperties": {
                         "type": "string"
@@ -4826,6 +5111,10 @@ Each event will be submitted via HTTP POST to the user provided URL.
                 },
                 "target_exe": {
                     "title": "Target Exe",
+                    "type": "string"
+                },
+                "target_method": {
+                    "title": "Target Method",
                     "type": "string"
                 },
                 "target_options": {
@@ -4847,6 +5136,13 @@ Each event will be submitted via HTTP POST to the user provided URL.
                 "target_workers": {
                     "title": "Target Workers",
                     "type": "integer"
+                },
+                "task_env": {
+                    "additionalProperties": {
+                        "type": "string"
+                    },
+                    "title": "Task Env",
+                    "type": "object"
                 },
                 "type": {
                     "$ref": "#/definitions/TaskType"
@@ -4884,6 +5180,9 @@ Each event will be submitted via HTTP POST to the user provided URL.
             "description": "An enumeration.",
             "enum": [
                 "coverage",
+                "dotnet_coverage",
+                "dotnet_crash_report",
+                "libfuzzer_dotnet_fuzz",
                 "libfuzzer_fuzz",
                 "libfuzzer_coverage",
                 "libfuzzer_crash_report",
@@ -5169,6 +5468,7 @@ Each event will be submitted via HTTP POST to the user provided URL.
                 "coverage",
                 "crashes",
                 "inputs",
+                "crashdumps",
                 "no_repro",
                 "readonly_inputs",
                 "reports",
@@ -5176,7 +5476,10 @@ Each event will be submitted via HTTP POST to the user provided URL.
                 "tools",
                 "unique_inputs",
                 "unique_reports",
-                "regression_reports"
+                "regression_reports",
+                "logs",
+                "extra_setup",
+                "extra_output"
             ],
             "title": "ContainerType"
         },
@@ -5195,7 +5498,8 @@ Each event will be submitted via HTTP POST to the user provided URL.
         "Error": {
             "properties": {
                 "code": {
-                    "$ref": "#/definitions/ErrorCode"
+                    "title": "Code",
+                    "type": "integer"
                 },
                 "errors": {
                     "items": {
@@ -5203,43 +5507,19 @@ Each event will be submitted via HTTP POST to the user provided URL.
                     },
                     "title": "Errors",
                     "type": "array"
+                },
+                "title": {
+                    "title": "Title",
+                    "type": "string"
                 }
             },
             "required": [
                 "code",
+                "title",
                 "errors"
             ],
             "title": "Error",
             "type": "object"
-        },
-        "ErrorCode": {
-            "description": "An enumeration.",
-            "enum": [
-                450,
-                451,
-                452,
-                453,
-                454,
-                455,
-                456,
-                457,
-                458,
-                459,
-                460,
-                461,
-                462,
-                463,
-                464,
-                465,
-                467,
-                468,
-                469,
-                470,
-                471,
-                472,
-                473
-            ],
-            "title": "ErrorCode"
         },
         "EventCrashReported": {
             "properties": {
@@ -5357,7 +5637,6 @@ Each event will be submitted via HTTP POST to the user provided URL.
                     "type": "string"
                 },
                 "scaleset_id": {
-                    "format": "uuid",
                     "title": "Scaleset Id",
                     "type": "string"
                 }
@@ -5381,7 +5660,6 @@ Each event will be submitted via HTTP POST to the user provided URL.
                     "type": "string"
                 },
                 "scaleset_id": {
-                    "format": "uuid",
                     "title": "Scaleset Id",
                     "type": "string"
                 }
@@ -5400,12 +5678,14 @@ Each event will be submitted via HTTP POST to the user provided URL.
                     "title": "Machine Id",
                     "type": "string"
                 },
+                "machine_state": {
+                    "$ref": "#/definitions/NodeState"
+                },
                 "pool_name": {
                     "title": "Pool Name",
                     "type": "string"
                 },
                 "scaleset_id": {
-                    "format": "uuid",
                     "title": "Scaleset Id",
                     "type": "string"
                 }
@@ -5429,7 +5709,6 @@ Each event will be submitted via HTTP POST to the user provided URL.
                     "type": "string"
                 },
                 "scaleset_id": {
-                    "format": "uuid",
                     "title": "Scaleset Id",
                     "type": "string"
                 },
@@ -5622,7 +5901,6 @@ Each event will be submitted via HTTP POST to the user provided URL.
                     "type": "string"
                 },
                 "scaleset_id": {
-                    "format": "uuid",
                     "title": "Scaleset Id",
                     "type": "string"
                 },
@@ -5653,7 +5931,6 @@ Each event will be submitted via HTTP POST to the user provided URL.
                     "type": "string"
                 },
                 "scaleset_id": {
-                    "format": "uuid",
                     "title": "Scaleset Id",
                     "type": "string"
                 }
@@ -5675,7 +5952,6 @@ Each event will be submitted via HTTP POST to the user provided URL.
                     "type": "string"
                 },
                 "scaleset_id": {
-                    "format": "uuid",
                     "title": "Scaleset Id",
                     "type": "string"
                 }
@@ -5695,7 +5971,6 @@ Each event will be submitted via HTTP POST to the user provided URL.
                     "type": "string"
                 },
                 "scaleset_id": {
-                    "format": "uuid",
                     "title": "Scaleset Id",
                     "type": "string"
                 },
@@ -5719,7 +5994,6 @@ Each event will be submitted via HTTP POST to the user provided URL.
                     "type": "string"
                 },
                 "scaleset_id": {
-                    "format": "uuid",
                     "title": "Scaleset Id",
                     "type": "string"
                 },
@@ -5925,11 +6199,6 @@ Each event will be submitted via HTTP POST to the user provided URL.
                     "title": "Admins",
                     "type": "array"
                 },
-                "allow_pool_management": {
-                    "default": true,
-                    "title": "Allow Pool Management",
-                    "type": "boolean"
-                },
                 "allowed_aad_tenants": {
                     "items": {
                         "format": "uuid",
@@ -5944,6 +6213,16 @@ Each event will be submitted via HTTP POST to the user provided URL.
                     },
                     "title": "Api Access Rules",
                     "type": "object"
+                },
+                "default_linux_vm_image": {
+                    "default": "Canonical:0001-com-ubuntu-server-jammy:22_04-lts:latest",
+                    "title": "Default Linux Vm Image",
+                    "type": "string"
+                },
+                "default_windows_vm_image": {
+                    "default": "MicrosoftWindowsDesktop:Windows-11:win11-22h2-pro:latest",
+                    "title": "Default Windows Vm Image",
+                    "type": "string"
                 },
                 "extensions": {
                     "$ref": "#/definitions/AzureVmExtensionConfig"
@@ -5969,6 +6248,11 @@ Each event will be submitted via HTTP POST to the user provided URL.
                     "default": "Standard_B2s",
                     "title": "Proxy Vm Sku",
                     "type": "string"
+                },
+                "require_admin_privileges": {
+                    "default": false,
+                    "title": "Require Admin Privileges",
+                    "type": "boolean"
                 },
                 "vm_tags": {
                     "additionalProperties": {
@@ -6002,6 +6286,10 @@ Each event will be submitted via HTTP POST to the user provided URL.
                     "minimum": 1,
                     "title": "Duration",
                     "type": "integer"
+                },
+                "logs": {
+                    "title": "Logs",
+                    "type": "string"
                 },
                 "name": {
                     "title": "Name",
@@ -6178,6 +6466,10 @@ Each event will be submitted via HTTP POST to the user provided URL.
                 },
                 "original_crash_test_result": {
                     "$ref": "#/definitions/CrashTestResult"
+                },
+                "report_url": {
+                    "title": "Report Url",
+                    "type": "string"
                 }
             },
             "required": [
@@ -6264,6 +6556,14 @@ Each event will be submitted via HTTP POST to the user provided URL.
                     "title": "Minimized Stack Sha256",
                     "type": "string"
                 },
+                "onefuzz_version": {
+                    "title": "Onefuzz Version",
+                    "type": "string"
+                },
+                "report_url": {
+                    "title": "Report Url",
+                    "type": "string"
+                },
                 "scariness_description": {
                     "title": "Scariness Description",
                     "type": "string"
@@ -6275,6 +6575,14 @@ Each event will be submitted via HTTP POST to the user provided URL.
                 "task_id": {
                     "format": "uuid",
                     "title": "Task Id",
+                    "type": "string"
+                },
+                "tool_name": {
+                    "title": "Tool Name",
+                    "type": "string"
+                },
+                "tool_version": {
+                    "title": "Tool Version",
                     "type": "string"
                 }
             },
@@ -6362,9 +6670,7 @@ Each event will be submitted via HTTP POST to the user provided URL.
             },
             "required": [
                 "job_id",
-                "task",
-                "containers",
-                "tags"
+                "task"
             ],
             "title": "TaskConfig",
             "type": "object"
@@ -6450,6 +6756,10 @@ Each event will be submitted via HTTP POST to the user provided URL.
                     "title": "Expect Crash On Failure",
                     "type": "boolean"
                 },
+                "function_allowlist": {
+                    "title": "Function Allowlist",
+                    "type": "string"
+                },
                 "generator_env": {
                     "additionalProperties": {
                         "type": "string"
@@ -6468,9 +6778,18 @@ Each event will be submitted via HTTP POST to the user provided URL.
                     "title": "Generator Options",
                     "type": "array"
                 },
+                "min_available_memory_mb": {
+                    "minimum": 0,
+                    "title": "Min Available Memory Mb",
+                    "type": "integer"
+                },
                 "minimized_stack_depth": {
                     "title": "Minimized Stack Depth",
                     "type": "integer"
+                },
+                "module_allowlist": {
+                    "title": "Module Allowlist",
+                    "type": "string"
                 },
                 "preserve_existing_outputs": {
                     "title": "Preserve Existing Outputs",
@@ -6490,6 +6809,10 @@ Each event will be submitted via HTTP POST to the user provided URL.
                     },
                     "title": "Report List",
                     "type": "array"
+                },
+                "source_allowlist": {
+                    "title": "Source Allowlist",
+                    "type": "string"
                 },
                 "stats_file": {
                     "title": "Stats File",
@@ -6520,6 +6843,14 @@ Each event will be submitted via HTTP POST to the user provided URL.
                     "title": "Supervisor Options",
                     "type": "array"
                 },
+                "target_assembly": {
+                    "title": "Target Assembly",
+                    "type": "string"
+                },
+                "target_class": {
+                    "title": "Target Class",
+                    "type": "string"
+                },
                 "target_env": {
                     "additionalProperties": {
                         "type": "string"
@@ -6529,6 +6860,10 @@ Each event will be submitted via HTTP POST to the user provided URL.
                 },
                 "target_exe": {
                     "title": "Target Exe",
+                    "type": "string"
+                },
+                "target_method": {
+                    "title": "Target Method",
                     "type": "string"
                 },
                 "target_options": {
@@ -6550,6 +6885,13 @@ Each event will be submitted via HTTP POST to the user provided URL.
                 "target_workers": {
                     "title": "Target Workers",
                     "type": "integer"
+                },
+                "task_env": {
+                    "additionalProperties": {
+                        "type": "string"
+                    },
+                    "title": "Task Env",
+                    "type": "object"
                 },
                 "type": {
                     "$ref": "#/definitions/TaskType"
@@ -6601,6 +6943,9 @@ Each event will be submitted via HTTP POST to the user provided URL.
             "description": "An enumeration.",
             "enum": [
                 "coverage",
+                "dotnet_coverage",
+                "dotnet_crash_report",
+                "libfuzzer_dotnet_fuzz",
                 "libfuzzer_fuzz",
                 "libfuzzer_coverage",
                 "libfuzzer_crash_report",
